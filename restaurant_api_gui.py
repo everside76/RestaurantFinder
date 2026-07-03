@@ -388,6 +388,45 @@ class App:
         self._build_main()
         self.select_service("I1200", initial=True)
 
+    def _sync_ime_font(self):
+        """Windows 한글 IME 조합 글자가 입력칸 폰트보다 커 보이는 문제 방지.
+        현재 포커스 창의 IME 조합 폰트를 입력칸 폰트(맑은 고딕)에 맞춘다."""
+        try:
+            import ctypes
+            from ctypes import wintypes
+
+            hwnd = ctypes.windll.user32.GetFocus()
+            if not hwnd:
+                return
+            imm = ctypes.windll.imm32
+            himc = imm.ImmGetContext(hwnd)
+            if not himc:
+                return
+
+            class LOGFONTW(ctypes.Structure):
+                _fields_ = [
+                    ("lfHeight", wintypes.LONG), ("lfWidth", wintypes.LONG),
+                    ("lfEscapement", wintypes.LONG), ("lfOrientation", wintypes.LONG),
+                    ("lfWeight", wintypes.LONG),
+                    ("lfItalic", ctypes.c_byte), ("lfUnderline", ctypes.c_byte),
+                    ("lfStrikeOut", ctypes.c_byte), ("lfCharSet", ctypes.c_byte),
+                    ("lfOutPrecision", ctypes.c_byte), ("lfClipPrecision", ctypes.c_byte),
+                    ("lfQuality", ctypes.c_byte), ("lfPitchAndFamily", ctypes.c_byte),
+                    ("lfFaceName", ctypes.c_wchar * 32),
+                ]
+
+            dpi = self.root.winfo_fpixels("1i")
+            px = int(round(10 * dpi / 72.0))  # 10pt를 현재 DPI 기준 픽셀 높이로
+            lf = LOGFONTW()
+            lf.lfHeight = -px
+            lf.lfWeight = 400
+            lf.lfCharSet = 129  # HANGEUL_CHARSET
+            lf.lfFaceName = FONT
+            imm.ImmSetCompositionFontW(himc, ctypes.byref(lf))
+            imm.ImmReleaseContext(hwnd, himc)
+        except Exception:
+            pass  # IME 폰트 설정 실패해도 입력 자체에는 지장 없음
+
     # ── 스타일 ──────────────────────────────
     def _init_styles(self):
         style = ttk.Style()
@@ -558,6 +597,8 @@ class App:
             ent.grid(row=1 + i, column=2, sticky="w", padx=8, pady=3, ipady=2)
             # IME가 마지막 글자를 확정한 뒤 검색되도록 after_idle로 지연
             ent.bind("<Return>", lambda e: self.root.after_idle(self.search))
+            # 포커스를 받을 때 IME 조합 글자 폰트를 입력칸 폰트에 맞춤(확대 방지)
+            ent.bind("<FocusIn>", lambda e: self.root.after(1, self._sync_ime_font))
             self.cond_rows.append((var_field, cbo, var_value))
 
         # 조건 3개 행의 높이를 동일하게 고정 (오른쪽 패널 높이에 따라 간격이 달라지지 않도록)
