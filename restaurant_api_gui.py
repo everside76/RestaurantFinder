@@ -547,9 +547,17 @@ class App:
             cbo = ttk.Combobox(cond, textvariable=var_field, state="readonly", width=22, font=(FONT, 10))
             cbo.grid(row=1 + i, column=1, sticky="w", pady=3)
             var_value = tk.StringVar()
-            ent = ttk.Entry(cond, textvariable=var_value, width=36, font=(FONT, 10))
-            ent.grid(row=1 + i, column=2, sticky="w", padx=8, pady=3)
-            ent.bind("<Return>", lambda e: self.search())
+            # 한글 IME 조합이 매끄럽도록 classic tk.Entry 사용 (ttk.Entry는 조합 중
+            # 글자가 커 보이는 문제가 있음). 테두리는 ttk 룩에 가깝게 직접 지정.
+            ent = tk.Entry(
+                cond, textvariable=var_value, width=36, font=(FONT, 10),
+                relief="solid", bd=1, highlightthickness=1,
+                highlightbackground=C["border"], highlightcolor=C["accent"],
+                disabledbackground="#F3F4F6",
+            )
+            ent.grid(row=1 + i, column=2, sticky="w", padx=8, pady=3, ipady=2)
+            # IME가 마지막 글자를 확정한 뒤 검색되도록 after_idle로 지연
+            ent.bind("<Return>", lambda e: self.root.after_idle(self.search))
             self.cond_rows.append((var_field, cbo, var_value))
 
         # 조건 3개 행의 높이를 동일하게 고정 (오른쪽 패널 높이에 따라 간격이 달라지지 않도록)
