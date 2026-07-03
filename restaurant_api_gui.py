@@ -90,7 +90,7 @@ SERVICES = {
             "관할기관": "INSTT_NM",
             "인허가번호": "LCNS_NO",
         },
-        "default_fields": ["소재지 주소", "업소명"],  # 기본으로 선택해 둘 조건 필드
+        "default_fields": ["업소명", "소재지 주소"],  # 기본으로 선택해 둘 조건 필드
         "has_clsbiz": True,  # 폐업일자 필드 보유 → '영업 중만' 필터 지원
     },
     "I2861": {
@@ -113,7 +113,7 @@ SERVICES = {
             "변경 후 내용(대표자 등)": "CHNG_AF_CN",
             "인허가번호": "LCNS_NO",
         },
-        "default_fields": ["주소", "업소명"],
+        "default_fields": ["업소명", "주소"],
         "has_clsbiz": False,
     },
 }
