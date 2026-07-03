@@ -538,25 +538,29 @@ class App:
             ent.bind("<Return>", lambda e: self.search())
             self.cond_rows.append((var_field, cbo, var_value))
 
-        # 옵션
-        opt = tk.Frame(cond, bg=C["card"])
-        opt.grid(row=1, column=3, rowspan=2, sticky="nw", padx=(20, 0))
+        # 조건 3개 행의 높이를 동일하게 고정 (오른쪽 패널 높이에 따라 간격이 달라지지 않도록)
+        for r in (1, 2, 3):
+            cond.rowconfigure(r, uniform="condrow")
+
+        # 오른쪽 패널: 안내·옵션(위) + 버튼(아래), 조건 3행 전체에 걸침
+        side = tk.Frame(cond, bg=C["card"])
+        side.grid(row=1, column=3, rowspan=3, sticky="nsew", padx=(20, 0))
         tk.Label(
-            opt,
+            side,
             text="조건에 맞는 서버 데이터 전체를\n1,000건씩 자동으로 이어서 수신합니다.",
             bg=C["card"], fg=C["muted"], font=(FONT, 8), justify="left", anchor="w",
-        ).grid(row=0, column=0, sticky="w", pady=(0, 4))
+        ).pack(anchor="w", pady=(0, 4))
 
         self.var_open_only = tk.BooleanVar(value=True)  # 기본: 영업 중인 업소만
         self.chk_open = tk.Checkbutton(
-            opt, text="영업 중인 업소만 표시 (폐업 제외)", variable=self.var_open_only,
+            side, text="영업 중인 업소만 표시 (폐업 제외)", variable=self.var_open_only,
             bg=C["card"], font=(FONT, 9), anchor="w",
         )
-        self.chk_open.grid(row=1, column=0, sticky="w")
+        self.chk_open.pack(anchor="w")
 
         # 조회/중지/지우기 버튼
-        btns = tk.Frame(cond, bg=C["card"])
-        btns.grid(row=3, column=3, sticky="se", padx=(20, 0))
+        btns = tk.Frame(side, bg=C["card"])
+        btns.pack(side="bottom", anchor="e", pady=(6, 0))
         self.btn_search = tk.Button(
             btns, text="조회", command=self.search, bg=C["accent"], fg="white",
             font=(FONT, 11, "bold"), relief="flat", padx=28, pady=6, cursor="hand2",
