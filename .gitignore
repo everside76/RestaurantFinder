@@ -1,0 +1,15 @@
+# 인증키 저장 파일 — 절대 커밋 금지
+config.json
+
+# 빌드 산출물
+dist/
+build/
+*.spec
+
+# Python
+__pycache__/
+*.pyc
+
+# 조회 결과물
+result.json
+*.csv
