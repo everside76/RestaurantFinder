@@ -34,6 +34,14 @@ if getattr(sys, "frozen", False):
 else:
     CONFIG_PATH = Path(__file__).with_name("config.json")
 
+
+def resource_path(name: str) -> Path:
+    """번들 리소스(아이콘 등) 경로. PyInstaller onefile은 sys._MEIPASS에 풀린다."""
+    base = getattr(sys, "_MEIPASS", None)
+    if base:
+        return Path(base) / name
+    return Path(__file__).with_name(name)
+
 MAX_CONDITIONS = 3   # 조합 검색 조건 최대 개수
 PAGE_SIZE = 1000     # 한 번의 API 호출로 수신하는 건수 (API 최대치)
 MAX_TREE_ROWS = 5000 # 표에 표시할 최대 행 수 (성능 보호, 저장은 전체)
@@ -368,6 +376,12 @@ class App:
         root.geometry("1180x740")
         root.minsize(980, 600)
         root.configure(bg=C["bg"])
+        try:
+            ico = resource_path("app.ico")
+            if ico.exists():
+                root.iconbitmap(default=str(ico))
+        except Exception:
+            pass  # 아이콘 적용 실패해도 실행에는 지장 없음
 
         self._init_styles()
         self._build_sidebar()

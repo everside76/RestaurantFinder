@@ -7,10 +7,11 @@
 
 - **실행 파일**: `dist\RestaurantFinder.exe` (Python 설치 불필요, 더블클릭 실행)
 - 소스 실행: `python restaurant_api_gui.py`
-- 소스 수정 후 재빌드:
+- 소스 수정 후 재빌드 (아이콘 포함):
   ```
-  python -m PyInstaller --onefile --noconsole --name "RestaurantFinder" restaurant_api_gui.py
+  python -m PyInstaller --onefile --noconsole --name "RestaurantFinder" --icon "app.ico" --add-data "app.ico;." restaurant_api_gui.py
   ```
+- 아이콘 다시 생성: `python make_icon.py` (Pillow 필요, `app.ico` 재생성)
 
 ## 데이터셋
 
