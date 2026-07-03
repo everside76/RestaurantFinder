@@ -145,6 +145,13 @@ HELP_TEXT = """\
     실제로 포함된 행만 표에 표시합니다. (상단 카드에서 수신/일치 건수 확인)
   · '영업 중인 업소만 표시'를 체크하면 폐업일자가 있는 업소를 제외합니다.
 
+■ 결과 표 다루기
+  · 열 제목을 클릭하면 그 필드 기준으로 정렬됩니다. 다시 클릭하면 오름차순/내림차순이
+    바뀝니다. (제목 옆 ▲/▼가 현재 정렬 방향)
+  · 행을 더블클릭하면 모든 필드의 상세 정보를 볼 수 있습니다.
+  · 셀에서 마우스 오른쪽 버튼을 누르면 '셀 값 / 행 전체 / 열 전체'를 복사할 수 있습니다.
+    (Ctrl+C 는 선택한 행 복사)
+
 ■ 검색 속도 관련
   · 여러 조건을 입력하면 서버에는 가장 구체적인 조건 1개(인허가번호 > 업소명 > 대표자명 > 업종 > 주소 순)만
     보내고, 나머지 조건은 프로그램이 수신 데이터에서 자동으로 걸러냅니다.
@@ -361,8 +368,12 @@ def format_date(value: str) -> str:
 class App:
     def __init__(self, root: tk.Tk):
         self.root = root
-        self.rows = []          # 표에 표시 중인(조건 일치) 결과
-        self.rows_received = 0  # 서버에서 수신한 건수
+        self.rows = []              # 표에 표시 중인(조건 일치) 결과
+        self.rows_received = 0      # 서버에서 수신한 건수
+        self._row_by_item = {}      # 트리 항목 id → 원본 row(dict) 매핑
+        self._sort_field = None     # 현재 정렬 기준 필드
+        self._sort_desc = False     # 내림차순 여부
+        self._base_headings = {}    # 필드 → 정렬 화살표 없는 원래 헤더 텍스트
         self._timer_id = None
         self._elapsed = 0
         self._cond_desc = ""
@@ -677,8 +688,17 @@ class App:
         tf.rowconfigure(0, weight=1)
         tf.columnconfigure(0, weight=1)
         self.tree.bind("<Double-1>", self.show_detail)
+        self.tree.bind("<Button-3>", self._show_cell_menu)  # 우클릭 복사 메뉴
+        self.tree.bind("<Control-c>", lambda e: self._copy_row())
         self.tree.tag_configure("odd", background="#F8F9FE")
         self.tree.tag_configure("closed", foreground="#9CA3AF")
+
+        # 우클릭 복사 메뉴
+        self._menu = tk.Menu(self.root, tearoff=0)
+        self._menu.add_command(label="이 셀 값 복사", command=self._copy_cell)
+        self._menu.add_command(label="이 행 전체 복사", command=self._copy_row)
+        self._menu.add_command(label="이 열 전체 복사", command=self._copy_column)
+        self._menu_target = None  # (item, field)
 
         # 하단 상태줄
         bottom = tk.Frame(main, bg=C["bg"])
@@ -760,6 +780,10 @@ class App:
 
     def setup_columns(self, columns: dict):
         self.tree.delete(*self.tree.get_children())
+        self._row_by_item = {}
+        self._sort_field = None
+        self._sort_desc = False
+        self._base_headings = dict(columns)
         self.tree["columns"] = list(columns.keys())
         for field, label in columns.items():
             width = 95 if field.endswith(("_DT", "YMD")) or field == "YEAR" else 130
@@ -767,7 +791,8 @@ class App:
                 width = 240
             if field == "PRSDNT_NM":
                 width = 85
-            self.tree.heading(field, text=label)
+            # 헤더 클릭 시 해당 필드로 정렬
+            self.tree.heading(field, text=label, command=lambda f=field: self._sort_by(f))
             self.tree.column(field, width=width, anchor="w")
 
     def search(self):
@@ -900,7 +925,8 @@ class App:
             tags = ["odd"] if pos % 2 == 1 else []
             if info["has_clsbiz"] and (row.get("CLSBIZ_DT") or "").strip():
                 tags.append("closed")  # 폐업 업소는 회색으로 표시
-            self.tree.insert("", "end", values=values, tags=tags)
+            item = self.tree.insert("", "end", values=values, tags=tags)
+            self._row_by_item[item] = row
 
         if info["has_clsbiz"]:
             self._open_cnt += sum(
@@ -971,10 +997,9 @@ class App:
         sel = self.tree.selection()
         if not sel:
             return
-        idx = self.tree.index(sel[0])
-        if idx >= len(self.rows):
+        row = self._row_by_item.get(sel[0])
+        if row is None:
             return
-        row = self.rows[idx]
         info = SERVICES[self.service_id]
 
         win = tk.Toplevel(self.root)
@@ -987,6 +1012,109 @@ class App:
             label = info["columns"].get(field, field)
             txt.insert("end", f"{label} ({field})\n    {value or '-'}\n\n")
         txt.config(state="disabled")
+
+    # ── 정렬 ────────────────────────────────
+    def _sort_by(self, field: str):
+        """헤더 클릭 → 해당 필드 기준 정렬 (같은 필드 재클릭 시 오름/내림 토글)."""
+        items = list(self.tree.get_children(""))
+        if not items:
+            return
+        if self._sort_field == field:
+            self._sort_desc = not self._sort_desc
+        else:
+            self._sort_field = field
+            self._sort_desc = False
+
+        def key(item):
+            raw = (self.tree.set(item, field) or "").strip()
+            return raw
+
+        vals = [key(it) for it in items]
+        # 값이 모두 숫자로 해석되면 숫자 정렬, 아니면 문자열 정렬. 빈 값은 항상 뒤로.
+        def as_num(s):
+            try:
+                return float(s.replace(",", ""))
+            except ValueError:
+                return None
+        numeric = all(as_num(v) is not None for v in vals if v)
+
+        def sort_key(item):
+            v = key(item)
+            empty = 1 if v == "" else 0  # 빈 값은 뒤로
+            if numeric:
+                return (empty, as_num(v) if v else 0.0)
+            return (empty, v)
+
+        ordered = sorted(items, key=sort_key, reverse=self._sort_desc)
+        for idx, item in enumerate(ordered):
+            self.tree.move(item, "", idx)
+
+        self._restripe()
+        self._update_sort_indicator()
+
+    def _restripe(self):
+        """정렬 후 줄무늬(odd)와 폐업(closed) 태그를 표시 순서에 맞게 재적용."""
+        info = SERVICES[self.service_id]
+        for idx, item in enumerate(self.tree.get_children("")):
+            tags = ["odd"] if idx % 2 == 1 else []
+            row = self._row_by_item.get(item, {})
+            if info["has_clsbiz"] and (row.get("CLSBIZ_DT") or "").strip():
+                tags.append("closed")
+            self.tree.item(item, tags=tags)
+
+    def _update_sort_indicator(self):
+        """헤더 텍스트에 정렬 방향 화살표(▲/▼) 표시."""
+        arrow = " ▼" if self._sort_desc else " ▲"
+        for field, label in self._base_headings.items():
+            text = label + (arrow if field == self._sort_field else "")
+            self.tree.heading(field, text=text)
+
+    # ── 복사 ────────────────────────────────
+    def _show_cell_menu(self, event):
+        """우클릭한 셀을 선택하고 복사 메뉴 표시."""
+        item = self.tree.identify_row(event.y)
+        col = self.tree.identify_column(event.x)  # '#1', '#2' ...
+        if not item or not col:
+            return
+        self.tree.selection_set(item)
+        try:
+            field = self.tree["columns"][int(col[1:]) - 1]
+        except (ValueError, IndexError):
+            return
+        self._menu_target = (item, field)
+        label = self._base_headings.get(field, field)
+        self._menu.entryconfig(0, label=f"'{label}' 셀 값 복사")
+        self._menu.entryconfig(2, label=f"'{label}' 열 전체 복사")
+        self._menu.tk_popup(event.x_root, event.y_root)
+
+    def _to_clipboard(self, text: str, desc: str):
+        self.root.clipboard_clear()
+        self.root.clipboard_append(text)
+        self.var_status.set(f"클립보드에 복사됨: {desc}")
+
+    def _copy_cell(self):
+        if not self._menu_target:
+            return
+        item, field = self._menu_target
+        value = self.tree.set(item, field)
+        self._to_clipboard(value, f"{self._base_headings.get(field, field)} = {value or '(빈 값)'}")
+
+    def _copy_row(self):
+        sel = self.tree.selection()
+        if not sel:
+            return
+        values = self.tree.item(sel[0], "values")
+        self._to_clipboard("\t".join(str(v) for v in values), "선택한 행 전체")
+
+    def _copy_column(self):
+        if not self._menu_target:
+            return
+        _item, field = self._menu_target
+        col_vals = [self.tree.set(it, field) for it in self.tree.get_children("")]
+        self._to_clipboard(
+            "\n".join(col_vals),
+            f"'{self._base_headings.get(field, field)}' 열 {len(col_vals)}건",
+        )
 
     def show_help(self):
         win = tk.Toplevel(self.root)
