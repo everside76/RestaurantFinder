@@ -15,6 +15,7 @@ import json
 import re
 import sys
 import threading
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -136,6 +137,13 @@ HELP_TEXT = """\
     실제로 포함된 행만 표에 표시합니다. (상단 카드에서 수신/일치 건수 확인)
   · '영업 중인 업소만 표시'를 체크하면 폐업일자가 있는 업소를 제외합니다.
 
+■ 검색 속도 관련
+  · 여러 조건을 입력하면 서버에는 가장 구체적인 조건 1개(인허가번호 > 업소명 > 대표자명 > 업종 > 주소 순)만
+    보내고, 나머지 조건은 프로그램이 수신 데이터에서 자동으로 걸러냅니다.
+    (서버가 여러 조건을 정확히 처리하지 못하고, 넓은 조건은 시간 초과가 잦기 때문)
+  · '서울'처럼 대상이 매우 많은 주소·지역 '단독' 검색은 서버가 느려 시간 초과가 날 수 있습니다.
+    이때는 업소명 등 구체적인 조건을 함께 입력하세요.
+
 ■ 데이터 수신 방식
   · [조회]를 누르면 조건에 맞는 서버 데이터 '전체'를 1,000건씩 자동으로 이어서 수신합니다.
   · 수신 중 [중지]를 누르면 그때까지 수신한 결과만 표시합니다.
@@ -241,29 +249,73 @@ def build_url(key: str, service: str, start: int, end: int, filters: dict) -> st
     return url
 
 
-def api_fetch(url: str, service: str):
-    """API 호출. (total, rows) 반환, 오류 시 RuntimeError."""
-    try:
-        with urllib.request.urlopen(url, timeout=60) as resp:
-            text = resp.read().decode("utf-8", errors="replace")
-    except urllib.error.HTTPError as e:
-        raise RuntimeError(f"HTTP 오류: {e.code} {e.reason}")
-    except urllib.error.URLError as e:
-        raise RuntimeError(f"서버 연결 실패: {e.reason}")
-    except (TimeoutError, OSError) as e:
-        raise RuntimeError(f"네트워크 오류(시간 초과 등): {e}")
+# 서버에 보낼 조건 선택 우선순위 (선별력 높은 필드 순).
+# 서버는 다중 조건을 정확히 AND 처리하지 못하고, '서울'처럼 대상이 많은
+# 광범위한 조건은 처리 시간이 매우 길어 시간 초과가 잦다.
+FIELD_SELECTIVITY = [
+    "LCNS_NO", "BSSH_NM", "PRSDNT_NM", "CHNG_BF_CN", "CHNG_AF_CN", "TELNO",
+    "INDUTY_NM", "INDUTY_CD_NM", "INSTT_NM", "CHNG_PRVNS",
+    "LOCP_ADDR", "SITE_ADDR", "SIGNGU_NM",
+]
 
-    try:
-        data = json.loads(text)
-    except json.JSONDecodeError:
-        m = re.search(r"alert\('([^']+)'\)", text)
-        if m:
-            raise RuntimeError(
-                f"서버 안내: {m.group(1)}\n"
-                f"(인증키가 '{service}' 데이터셋에 등록되지 않았을 수 있습니다. "
-                f"식품안전나라 마이페이지에서 활용 신청 데이터셋을 확인하세요.)"
-            )
-        raise RuntimeError("응답을 JSON으로 해석할 수 없습니다. 인증키를 확인하세요.")
+
+def pick_server_filters(filters: dict) -> dict:
+    """서버에는 가장 선별력 높은 조건 1개만 보내고 나머지는 클라이언트에서 필터링"""
+    if not filters:
+        return {}
+    for field in FIELD_SELECTIVITY:
+        if field in filters:
+            return {field: filters[field]}
+    return dict(list(filters.items())[:1])
+
+
+def api_fetch(url: str, service: str, timeout: int = 180, retries: int = 2):
+    """API 호출. (total, rows) 반환, 오류 시 RuntimeError.
+    시간 초과와 인증키 동시접속 거부는 자동 재시도."""
+    data = None
+    for attempt in range(retries + 1):
+        try:
+            with urllib.request.urlopen(url, timeout=timeout) as resp:
+                text = resp.read().decode("utf-8", errors="replace")
+        except urllib.error.HTTPError as e:
+            raise RuntimeError(f"HTTP 오류: {e.code} {e.reason}")
+        except (TimeoutError, urllib.error.URLError, OSError) as e:
+            is_timeout = isinstance(e, TimeoutError) or "timed out" in str(e).lower()
+            if is_timeout and attempt < retries:
+                continue  # 재시도
+            if is_timeout:
+                raise RuntimeError(
+                    "서버 응답 시간 초과입니다.\n\n"
+                    "· '서울'처럼 대상이 매우 많은 주소·지역 단독 검색은 서버 처리가 느립니다.\n"
+                    "· 업소명, 인허가번호 등 구체적인 조건을 함께 입력하면 빨라집니다.\n"
+                    "· 잠시 후 다시 시도해 보세요."
+                )
+            raise RuntimeError(f"서버 연결 실패: {e}")
+
+        try:
+            data = json.loads(text)
+            break
+        except json.JSONDecodeError:
+            # 서버가 JSON 대신 HTML 안내문(alert)을 보내는 경우
+            m = re.search(r"alert\('([^']+)'\)", text)
+            msg = m.group(1) if m else ""
+            if "접속 중" in msg:
+                # 같은 인증키의 이전 요청이 아직 처리 중 → 잠시 대기 후 재시도
+                if attempt < retries:
+                    time.sleep(3)
+                    continue
+                raise RuntimeError(
+                    "같은 인증키로 이미 요청이 진행 중입니다.\n"
+                    "이전 조회가 끝나기를 기다렸다가 다시 시도하세요.\n"
+                    "(다른 창이나 프로그램에서 같은 키를 쓰고 있는지도 확인)"
+                )
+            if msg:
+                raise RuntimeError(
+                    f"서버 안내: {msg}\n"
+                    f"(인증키가 '{service}' 데이터셋에 등록되지 않았을 수 있습니다. "
+                    f"식품안전나라 마이페이지에서 활용 신청 데이터셋을 확인하세요.)"
+                )
+            raise RuntimeError("응답을 JSON으로 해석할 수 없습니다. 인증키를 확인하세요.")
 
     body = data.get(service)
     if body is None:
@@ -683,6 +735,10 @@ class App:
 
         label_of = {v: k for k, v in info["search_fields"].items()}
         self._cond_desc = ", ".join(f"{label_of.get(f, f)}={v}" for f, v in filters.items()) or "조건 없음"
+        server_filters = pick_server_filters(filters)
+        if len(filters) > 1:
+            sf = next(iter(server_filters))
+            self._cond_desc += f" · 서버검색: {label_of.get(sf, sf)}, 나머지는 자동 필터링"
         self._page_info = "1페이지 요청 중"
         self.btn_search.config(state="disabled")
         self.btn_stop.config(state="normal")
@@ -694,14 +750,16 @@ class App:
         ).start()
 
     def _worker(self, key: str, service: str, filters: dict, open_only: bool):
-        """조건에 맞는 서버 데이터 전체를 1,000건씩 이어서 수신"""
+        """조건에 맞는 서버 데이터 전체를 1,000건씩 이어서 수신.
+        서버에는 가장 선별력 높은 조건 1개만 보내고, 전체 조건 검증은 _on_page에서 수행."""
+        server_filters = pick_server_filters(filters)
         start = 1
         total = None
         pages = 1
         page_no = 0
         try:
             while not self._cancel:
-                url = build_url(key, service, start, start + PAGE_SIZE - 1, filters)
+                url = build_url(key, service, start, start + PAGE_SIZE - 1, server_filters)
                 t, rows = api_fetch(url, service)
                 if total is None:
                     total = t
