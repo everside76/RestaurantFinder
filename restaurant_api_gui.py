@@ -361,6 +361,7 @@ class App:
         self._page_info = ""
         self._cancel = False
         self._open_cnt = 0
+        self._open_only_pref = True  # '영업 중만 표시' 기본값
         self._current_service = "I1200"
 
         root.title("음식점 정보 조회 대시보드 — 식품안전나라 오픈 API")
@@ -546,7 +547,7 @@ class App:
             bg=C["card"], fg=C["muted"], font=(FONT, 8), justify="left", anchor="w",
         ).grid(row=0, column=0, sticky="w", pady=(0, 4))
 
-        self.var_open_only = tk.BooleanVar(value=False)
+        self.var_open_only = tk.BooleanVar(value=True)  # 기본: 영업 중인 업소만
         self.chk_open = tk.Checkbutton(
             opt, text="영업 중인 업소만 표시 (폐업 제외)", variable=self.var_open_only,
             bg=C["card"], font=(FONT, 9), anchor="w",
@@ -652,8 +653,14 @@ class App:
                 cbo.current(0)
             var_value.set("")
 
-        self.chk_open.config(state="normal" if info["has_clsbiz"] else "disabled")
-        if not info["has_clsbiz"]:
+        if info["has_clsbiz"]:
+            self.chk_open.config(state="normal")
+            self.var_open_only.set(self._open_only_pref)
+        else:
+            # 폐업 필드가 없는 데이터셋으로 전환: 직전 선택을 기억해 두고 비활성화
+            if str(self.chk_open.cget("state")) == "normal":
+                self._open_only_pref = self.var_open_only.get()
+            self.chk_open.config(state="disabled")
             self.var_open_only.set(False)
 
         self.setup_columns(info["columns"])
