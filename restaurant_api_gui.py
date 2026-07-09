@@ -71,6 +71,7 @@ SERVICES = {
     "I1200": {
         "name": "식품접객업정보",
         "desc": "전국 음식점 인허가 (약 313만 건)",
+        "provider": "mfds",  # 식품안전나라(foodsafetykorea.go.kr) 오픈 API
         "columns": {
             "BSSH_NM": "업소명",
             "PRSDNT_NM": "대표자명",
@@ -96,6 +97,7 @@ SERVICES = {
     "I2861": {
         "name": "인허가 변경 정보",
         "desc": "음식점업소 변경 이력",
+        "provider": "mfds",  # 식품안전나라(foodsafetykorea.go.kr) 오픈 API
         "columns": {
             "BSSH_NM": "업소명",
             "SITE_ADDR": "주소",
@@ -115,6 +117,30 @@ SERVICES = {
         },
         "default_fields": ["업소명", "주소"],
         "has_clsbiz": False,
+    },
+    "MOIS_I1": {
+        "name": "일반음식점 (행정안전부)",
+        "desc": "공공데이터포털 · 별도 인증키",
+        "provider": "data_go_kr",  # 행정안전부 일반음식점 조회서비스 (data.go.kr)
+        "columns": {
+            "BPLC_NM": "사업장명",
+            "ROAD_NM_ADDR": "도로명주소",
+            "LOTNO_ADDR": "지번주소",
+            "SALS_STTS_NM": "영업상태",
+            "DTL_SALS_STTS_NM": "상세영업상태",
+            "BZSTAT_SE_NM": "업태",
+            "TELNO": "전화번호",
+            "LCPMT_YMD": "인허가일자",
+            "CLSBIZ_YMD": "폐업일자",
+            "MNG_NO": "관리번호",
+        },
+        # 검색 필드의 값은 응답 필드명(cond 파라미터에 그대로 쓰는 이름)으로 정의
+        "search_fields": {
+            "사업장명": "BPLC_NM",
+            "도로명주소": "ROAD_NM_ADDR",
+        },
+        "default_fields": ["사업장명", "도로명주소"],
+        "has_clsbiz": False,  # 폐업 판정은 영업상태코드로 처리(is_row_closed 참조)
     },
 }
 
@@ -171,10 +197,24 @@ HELP_TEXT = """\
   · 프로그램이 자동으로 몇 차례 재시도하며, 그래도 안 되면 잠시 후 다시 시도하세요.
   · 하루 호출량이 많으면 일시 제한될 수 있으니, 계속되면 시간을 두고(다음 날) 시도하세요.
 
-■ 인증키
-  · 식품안전나라(foodsafetykorea.go.kr) 회원가입 → 마이페이지 → 오픈API 인증키 발급
-  · 'sample' 키는 테스트용: 5건만 반환되고 검색 조건이 적용되지 않습니다.
-  · [키 저장] 체크 시 Windows 계정에 묶인 암호화(DPAPI)로 저장됩니다.
+■ '일반음식점 (행정안전부)' 데이터셋 — 공공데이터포털(data.go.kr)
+  · 사이드바 세 번째 항목입니다. 식품안전나라와는 별개의 데이터·별개의 인증키를 씁니다.
+  · 검색 조건: 사업장명 / 도로명주소 (모두 서버에서 AND로 정확히 처리됩니다.
+    식품안전나라와 달리 여러 조건을 서버가 직접 걸러 주므로 자동 필터링 안내가 없습니다.)
+  · 영업상태(영업/폐업)를 함께 제공하며, '영업 중인 업소만 표시'를 체크하면
+    영업/정상(코드 01)만 서버에서 받아 오고 폐업 행은 회색으로 구분됩니다.
+  · 페이지당 100건씩 나눠 받으므로 결과가 많으면 수신이 느릴 수 있습니다.
+    (2만 건을 넘으면 전체 수신 여부를 한 번 물어봅니다.)
+
+■ 인증키 (두 개는 서로 완전히 별개입니다)
+  · 데이터셋을 바꾸면 헤더의 인증키 입력란 라벨과 값이 자동으로 그 제공처의 키로 전환됩니다.
+  · 식품안전나라(foodsafetykorea.go.kr): 회원가입 → 마이페이지 → 오픈API 인증키 발급
+    - 'sample' 키는 테스트용으로 5건만 반환되고 검색 조건이 적용되지 않습니다.
+  · 공공데이터포털(data.go.kr): 회원가입 → 해당 API('행정안전부_식품_일반음식점 조회서비스')
+    활용신청 → 승인 후 마이페이지 → '일반 인증키(Decoding)'를 복사해 입력하세요.
+    - 반드시 Decoding 키를 입력해야 합니다(Encoding 키를 넣으면 인증 오류가 납니다).
+    - 활용신청 승인 직후에는 반영에 시간이 걸릴 수 있습니다(수십 분~1시간).
+  · [저장(암호화)] 체크 시 각 키가 Windows 계정에 묶인 암호화(DPAPI)로 따로 저장됩니다.
 """
 
 
@@ -236,24 +276,37 @@ def save_config(cfg: dict):
         pass
 
 
-def load_saved_key() -> str:
+# 데이터 제공처(provider)별 인증키 저장 필드명.
+# mfds=식품안전나라, data_go_kr=공공데이터포털. 두 키는 서로 완전히 별개다.
+PROVIDER_KEY_FIELD = {
+    "mfds": "api_key_enc",
+    "data_go_kr": "datagokr_key_enc",
+}
+
+
+def load_saved_key(provider: str = "mfds") -> str:
     cfg = load_config()
-    enc = cfg.get("api_key_enc")
+    field = PROVIDER_KEY_FIELD.get(provider, "api_key_enc")
+    enc = cfg.get(field)
     if enc:
         try:
             return dpapi_decrypt(enc)
         except OSError:
             return ""
-    return cfg.get("api_key", "")  # 구버전 평문 저장분 호환
+    if provider == "mfds":
+        return cfg.get("api_key", "")  # 구버전 평문 저장분 호환
+    return ""
 
 
-def save_key(key: str):
+def save_key(key: str, provider: str = "mfds"):
     cfg = load_config()
-    cfg.pop("api_key", None)
+    field = PROVIDER_KEY_FIELD.get(provider, "api_key_enc")
+    if provider == "mfds":
+        cfg.pop("api_key", None)  # 구버전 평문 필드 제거
     if key:
-        cfg["api_key_enc"] = dpapi_encrypt(key)
+        cfg[field] = dpapi_encrypt(key)
     else:
-        cfg.pop("api_key_enc", None)
+        cfg.pop(field, None)
     save_config(cfg)
 
 
@@ -377,6 +430,158 @@ def api_fetch(url: str, service: str, timeout: int = 180, retries: int = 3):
     raise RuntimeError("알 수 없는 오류로 조회에 실패했습니다.")
 
 
+# ── 공공데이터포털(data.go.kr) 일반음식점 API ──────────────
+DATAGOKR_URL = "https://apis.data.go.kr/1741000/general_restaurants/info"
+DATAGOKR_PAGE_SIZE = 100        # 공공데이터포털 numOfRows 최대치
+DATAGOKR_CONFIRM_COUNT = 20000  # 이 건수(2만)를 넘으면 전체 수신 여부 확인
+
+# 검색 필드(응답 필드명) → cond 파라미터 연산자.
+# LIKE=포함 검색, EQ=일치. 정의에 없는 필드는 기본 LIKE.
+DATAGOKR_COND_OP = {
+    "BPLC_NM": "LIKE",
+    "ROAD_NM_ADDR": "LIKE",
+    "SALS_STTS_CD": "EQ",
+    "OPN_ATMY_GRP_CD": "EQ",
+}
+
+# 헤더 resultCode 중 일시 오류로 보고 재시도할 코드
+DATAGOKR_RETRY_CODES = {"22"}  # LIMITED_NUMBER_OF_SERVICE_REQUESTS_EXCEEDS
+
+
+def _datagokr_normalize_items(items) -> list:
+    """items.item을 항상 리스트로 정규화.
+    - 결과 1건이면 dict 하나로 오므로 리스트로 감싼다.
+    - 결과 0건이면 items가 빈 문자열/None이거나 item이 없을 수 있다 → 빈 리스트."""
+    if not items:
+        return []
+    item = items.get("item") if isinstance(items, dict) else items
+    if not item:
+        return []
+    if isinstance(item, dict):
+        return [item]
+    if isinstance(item, list):
+        return item
+    return []
+
+
+def _datagokr_auth_message(auth_msg: str, reason_code: str) -> str:
+    return (
+        f"공공데이터포털 인증키가 유효하지 않습니다"
+        f"({auth_msg or '인증 오류'}"
+        f"{', 코드 ' + reason_code if reason_code else ''}).\n\n"
+        "· data.go.kr 마이페이지에서 일반 인증키(Decoding)를 확인하고 그대로 입력하세요.\n"
+        "· 해당 API 활용신청이 '승인'됐는지 확인하세요.\n"
+        "· 승인 직후에는 반영에 시간이 걸릴 수 있습니다(수십 분~1시간)."
+    )
+
+
+def datagokr_fetch(key: str, filters: dict, page_no: int,
+                   rows_per_page: int = DATAGOKR_PAGE_SIZE,
+                   timeout: int = 180, retries: int = 3):
+    """공공데이터포털 일반음식점 API 호출. (total_count, rows) 반환.
+    filters는 응답 필드명(BPLC_NM 등) → 검색어이며, cond[FIELD::OP]로 서버에 전달한다.
+    시간 초과·일시 오류는 자동 재시도. resultCode가 '00'이 아니면 RuntimeError."""
+    # serviceKey는 사용자가 Decoding 키를 입력한다는 전제로 직접 인코딩
+    parts = [
+        "serviceKey=" + urllib.parse.quote(key, safe=""),
+        "pageNo=" + str(page_no),
+        "numOfRows=" + str(rows_per_page),
+        "returnType=json",
+    ]
+    for field, value in filters.items():
+        op = DATAGOKR_COND_OP.get(field, "LIKE")
+        cond_key = "cond[{}::{}]".format(field, op)
+        parts.append(
+            urllib.parse.quote(cond_key, safe="") + "="
+            + urllib.parse.quote(str(value), safe="")
+        )
+    url = DATAGOKR_URL + "?" + "&".join(parts)
+
+    for attempt in range(retries + 1):
+        last = attempt == retries
+        try:
+            with urllib.request.urlopen(url, timeout=timeout) as resp:
+                text = resp.read().decode("utf-8", errors="replace")
+        except urllib.error.HTTPError as e:
+            # 공공데이터포털 게이트웨이는 인증키 형식이 아예 잘못된 경우
+            # JSON/XML 본문 없이 HTTP 401/403으로 바로 거부하기도 한다.
+            if e.code in (401, 403):
+                raise RuntimeError(_datagokr_auth_message(e.reason, str(e.code)))
+            raise RuntimeError(f"HTTP 오류: {e.code} {e.reason}")
+        except (TimeoutError, urllib.error.URLError, OSError) as e:
+            is_timeout = isinstance(e, TimeoutError) or "timed out" in str(e).lower()
+            if is_timeout and not last:
+                continue  # 재시도
+            if is_timeout:
+                raise RuntimeError(
+                    "서버 응답 시간 초과입니다.\n\n"
+                    "· 대상이 매우 많은 조건(넓은 지역 등)은 서버 처리가 느립니다.\n"
+                    "· 사업장명 등 구체적인 조건을 함께 입력하면 빨라집니다.\n"
+                    "· 잠시 후 다시 시도해 보세요."
+                )
+            raise RuntimeError(f"서버 연결 실패: {e}")
+
+        try:
+            data = json.loads(text)
+        except json.JSONDecodeError:
+            # 인증키 오류/미등록 시 게이트웨이가 returnType과 무관하게 XML을 반환한다.
+            auth = re.search(r"<returnAuthMsg>([^<]*)</returnAuthMsg>", text)
+            code = re.search(r"<returnReasonCode>([^<]*)</returnReasonCode>", text)
+            if auth:
+                raise RuntimeError(
+                    _datagokr_auth_message(auth.group(1), code.group(1) if code else "")
+                )
+            raise RuntimeError(
+                "응답을 JSON으로 해석할 수 없습니다.\n"
+                "공공데이터포털 인증키(Decoding)와 활용신청 상태를 확인하세요."
+            )
+
+        resp_obj = data.get("response") or {}
+        header = resp_obj.get("header") or {}
+        result_code = str(header.get("resultCode", ""))
+        result_msg = header.get("resultMsg", "")
+
+        # '03' 계열은 데이터 없음 → 빈 결과로 처리
+        if result_code in ("03",) or "NODATA" in str(result_msg).upper():
+            return 0, []
+        # 일시 오류(트래픽 초과 등)는 점증 대기 후 재시도
+        if result_code in DATAGOKR_RETRY_CODES and not last:
+            time.sleep(2 * (attempt + 1))
+            continue
+        if result_code and result_code != "00":
+            raise RuntimeError(
+                f"공공데이터포털 오류({result_code}): {result_msg or '알 수 없는 오류'}"
+            )
+
+        body = resp_obj.get("body") or {}
+        total = int(body.get("totalCount") or 0)
+        rows = _datagokr_normalize_items(body.get("items"))
+        return total, rows
+
+    # 이론상 도달하지 않음 (마지막 시도에서 반환/예외)
+    raise RuntimeError("알 수 없는 오류로 조회에 실패했습니다.")
+
+
+def is_row_closed(info: dict, row: dict) -> bool:
+    """폐업/말소 등 '영업 중이 아닌' 행인지 데이터셋별로 판정."""
+    if info.get("provider") == "data_go_kr":
+        # 영업상태코드 01=영업/정상. 코드가 있으면 01이 아닌 것을 폐업으로 간주.
+        cd = (row.get("SALS_STTS_CD") or "").strip()
+        if cd:
+            return cd != "01"
+        nm = (row.get("SALS_STTS_NM") or "") + (row.get("DTL_SALS_STTS_NM") or "")
+        return ("폐업" in nm) or ("말소" in nm)
+    # 식품안전나라: 폐업일자가 채워져 있으면 폐업
+    if info.get("has_clsbiz"):
+        return bool((row.get("CLSBIZ_DT") or "").strip())
+    return False
+
+
+def supports_open_filter(info: dict) -> bool:
+    """'영업 중만 표시' 기능(폐업 제외)을 지원하는 데이터셋인지."""
+    return bool(info.get("has_clsbiz")) or info.get("provider") == "data_go_kr"
+
+
 def row_matches(row: dict, filters: dict) -> bool:
     """모든 검색 조건 값이 해당 필드에 실제로 포함되는지 검증 (대소문자 무시)"""
     for field, value in filters.items():
@@ -409,6 +614,9 @@ class App:
         self._open_cnt = 0
         self._open_only_pref = True  # '영업 중만 표시' 기본값
         self._current_service = "I1200"
+        self._current_provider = "mfds"   # 현재 데이터셋의 제공처
+        self._key_by_provider = {}        # provider → 입력 중이던 인증키 기억
+        self._save_by_provider = {}       # provider → 저장 체크 상태 기억
 
         root.title("음식점 정보 조회 대시보드 — 식품안전나라 오픈 API")
         root.geometry("1180x740")
@@ -583,23 +791,34 @@ class App:
             font=(FONT, 15, "bold"), anchor="w",
         ).pack(side="left")
 
-        # 인증키 (헤더 오른쪽)
+        # 인증키 (헤더 오른쪽) — 데이터셋 제공처에 따라 라벨/키가 전환됨
         keybox = tk.Frame(header, bg=C["bg"])
         keybox.pack(side="right")
-        tk.Label(keybox, text="인증키", bg=C["bg"], fg=C["muted"], font=(FONT, 9)).pack(side="left", padx=(0, 6))
-        saved_key = load_saved_key()
+        keyrow = tk.Frame(keybox, bg=C["bg"])
+        keyrow.pack(side="top", anchor="e")
+        self.var_key_label = tk.StringVar(value="인증키(식품안전나라)")
+        tk.Label(
+            keyrow, textvariable=self.var_key_label, bg=C["bg"], fg=C["muted"], font=(FONT, 9),
+        ).pack(side="left", padx=(0, 6))
+        saved_key = load_saved_key("mfds")
         self.var_key = tk.StringVar(value=saved_key or "sample")
-        self.ent_key = ttk.Entry(keybox, textvariable=self.var_key, width=30, show="*")
+        self.ent_key = ttk.Entry(keyrow, textvariable=self.var_key, width=30, show="*")
         self.ent_key.pack(side="left")
         self.var_show = tk.BooleanVar(value=False)
         tk.Checkbutton(
-            keybox, text="표시", variable=self.var_show, bg=C["bg"], font=(FONT, 9),
+            keyrow, text="표시", variable=self.var_show, bg=C["bg"], font=(FONT, 9),
             command=lambda: self.ent_key.config(show="" if self.var_show.get() else "*"),
         ).pack(side="left", padx=2)
         self.var_save_key = tk.BooleanVar(value=bool(saved_key))
         tk.Checkbutton(
-            keybox, text="저장(암호화)", variable=self.var_save_key, bg=C["bg"], font=(FONT, 9),
+            keyrow, text="저장(암호화)", variable=self.var_save_key, bg=C["bg"], font=(FONT, 9),
         ).pack(side="left")
+        # 공공데이터포털 전용 안내(그 외에는 빈 문자열로 숨김)
+        self.var_key_hint = tk.StringVar(value="")
+        tk.Label(
+            keybox, textvariable=self.var_key_hint, bg=C["bg"], fg=C["accent"],
+            font=(FONT, 8), anchor="e", justify="right",
+        ).pack(side="top", anchor="e")
 
         # 검색 조건 카드
         cond_card = self._card(main, fill="x", padx=18, pady=6)
@@ -750,9 +969,47 @@ class App:
     def service_id(self) -> str:
         return self._current_service
 
+    def _switch_provider_key(self, new_provider: str):
+        """데이터셋 제공처가 바뀌면 헤더 인증키 입력란을 해당 provider용으로 전환.
+        전환 전 현재 입력값을 이전 provider용으로 기억하고, 저장 체크 시 암호화 저장."""
+        old = self._current_provider
+        if new_provider == old:
+            return
+        # 현재 입력값/저장 상태를 이전 provider용으로 기억
+        cur = self.var_key.get().strip()
+        self._key_by_provider[old] = cur
+        self._save_by_provider[old] = self.var_save_key.get()
+        try:
+            if self.var_save_key.get() and cur and cur != "sample":
+                save_key(cur, old)
+        except OSError:
+            pass  # 저장 실패해도 전환 자체는 진행
+
+        # 새 provider의 키/저장 상태 복원 (메모리 기억 우선, 없으면 저장분)
+        self._current_provider = new_provider
+        if new_provider in self._key_by_provider:
+            newkey = self._key_by_provider[new_provider]
+            newsave = self._save_by_provider.get(new_provider, bool(newkey))
+        else:
+            newkey = load_saved_key(new_provider)
+            newsave = bool(newkey)
+        if not newkey and new_provider == "mfds":
+            newkey = "sample"  # 식품안전나라 기본 테스트 키
+        self.var_key.set(newkey)
+        self.var_save_key.set(newsave)
+
+        # 라벨/안내 문구 갱신
+        if new_provider == "data_go_kr":
+            self.var_key_label.set("인증키(공공데이터포털)")
+            self.var_key_hint.set("Decoding 키(일반 인증키)를 입력하세요")
+        else:
+            self.var_key_label.set("인증키(식품안전나라)")
+            self.var_key_hint.set("")
+
     def select_service(self, sid: str, initial: bool = False):
         self._current_service = sid
         info = SERVICES[sid]
+        self._switch_provider_key(info.get("provider", "mfds"))
         self._highlight_sidebar(sid)
         self.var_title.set(f"{info['name']}  —  {info['desc']}")
 
@@ -767,11 +1024,11 @@ class App:
                 cbo.current(0)
             var_value.set("")
 
-        if info["has_clsbiz"]:
+        if supports_open_filter(info):
             self.chk_open.config(state="normal")
             self.var_open_only.set(self._open_only_pref)
         else:
-            # 폐업 필드가 없는 데이터셋으로 전환: 직전 선택을 기억해 두고 비활성화
+            # 폐업 필터를 지원하지 않는 데이터셋으로 전환: 직전 선택을 기억해 두고 비활성화
             if str(self.chk_open.cget("state")) == "normal":
                 self._open_only_pref = self.var_open_only.get()
             self.chk_open.config(state="disabled")
@@ -814,7 +1071,8 @@ class App:
         self.tree["columns"] = list(columns.keys())
         for field, label in columns.items():
             width = 95 if field.endswith(("_DT", "YMD")) or field == "YEAR" else 130
-            if field in ("SITE_ADDR", "LOCP_ADDR", "BSSH_NM"):
+            if field in ("SITE_ADDR", "LOCP_ADDR", "BSSH_NM",
+                         "ROAD_NM_ADDR", "LOTNO_ADDR", "BPLC_NM"):
                 width = 240
             if field == "PRSDNT_NM":
                 width = 85
@@ -829,27 +1087,37 @@ class App:
             return
 
         service = self.service_id
+        info = SERVICES[service]
+        provider = info.get("provider", "mfds")
         filters = self.collect_filters()
         self._last_filters = filters
 
         if not filters:
-            if not messagebox.askyesno(
-                "확인",
-                "검색 조건이 없습니다.\n"
-                "조건 없이 조회하면 처음 1,000건만 표시합니다.\n계속할까요?",
-            ):
+            if provider == "data_go_kr":
+                warn = (
+                    "검색 조건이 없습니다.\n"
+                    "조건 없이 조회하면 전국 데이터를 100건씩 순서대로 받습니다"
+                    "(양이 매우 많을 수 있음).\n계속할까요?"
+                )
+            else:
+                warn = (
+                    "검색 조건이 없습니다.\n"
+                    "조건 없이 조회하면 처음 1,000건만 표시합니다.\n계속할까요?"
+                )
+            if not messagebox.askyesno("확인", warn):
                 return
 
-        # 키 저장 처리 (DPAPI 암호화)
+        # 키 저장 처리 (DPAPI 암호화) — 현재 provider 필드에 저장
         try:
             if self.var_save_key.get() and key != "sample":
-                save_key(key)
+                save_key(key, provider)
             else:
-                save_key("")
+                save_key("", provider)
         except OSError as e:
             messagebox.showwarning("키 저장", str(e))
-
-        info = SERVICES[service]
+        # 메모리에도 현재 입력값/저장 상태 반영 (데이터셋 전환 시 유지)
+        self._key_by_provider[provider] = key
+        self._save_by_provider[provider] = self.var_save_key.get()
         # 결과 초기화
         self.setup_columns(info["columns"])
         self.rows = []
@@ -861,22 +1129,34 @@ class App:
 
         label_of = {v: k for k, v in info["search_fields"].items()}
         self._cond_desc = ", ".join(f"{label_of.get(f, f)}={v}" for f, v in filters.items()) or "조건 없음"
-        server_filters = pick_server_filters(filters)
-        if len(filters) > 1:
-            sf = next(iter(server_filters))
-            self._cond_desc += f" · 서버검색: {label_of.get(sf, sf)}, 나머지는 자동 필터링"
+        if provider == "data_go_kr":
+            # 공공데이터포털은 서버가 다중 조건 AND를 지원 → 모든 조건을 전송
+            if len(filters) > 1:
+                self._cond_desc += " · 서버에서 모든 조건 AND 검색"
+        else:
+            server_filters = pick_server_filters(filters)
+            if len(filters) > 1:
+                sf = next(iter(server_filters))
+                self._cond_desc += f" · 서버검색: {label_of.get(sf, sf)}, 나머지는 자동 필터링"
         self._page_info = "1페이지 요청 중"
         self.btn_search.config(state="disabled")
         self.btn_stop.config(state="normal")
         self.start_progress()
 
-        open_only = self.var_open_only.get() and info["has_clsbiz"]
+        open_only = self.var_open_only.get() and supports_open_filter(info)
         threading.Thread(
             target=self._worker, args=(key, service, filters, open_only), daemon=True
         ).start()
 
     def _worker(self, key: str, service: str, filters: dict, open_only: bool):
-        """조건에 맞는 서버 데이터 전체를 1,000건씩 이어서 수신.
+        """데이터 수신 작업 스레드. 제공처에 따라 페이징 방식을 분기."""
+        if SERVICES[service].get("provider") == "data_go_kr":
+            self._worker_datagokr(key, service, filters, open_only)
+            return
+        self._worker_mfds(key, service, filters, open_only)
+
+    def _worker_mfds(self, key: str, service: str, filters: dict, open_only: bool):
+        """식품안전나라: 조건에 맞는 서버 데이터 전체를 1,000건씩 이어서 수신.
         서버에는 가장 선별력 높은 조건 1개만 보내고, 전체 조건 검증은 _on_page에서 수행."""
         server_filters = pick_server_filters(filters)
         start = 1
@@ -917,6 +1197,45 @@ class App:
         except RuntimeError as e:
             self.root.after(0, self.on_error, str(e))
 
+    def _worker_datagokr(self, key: str, service: str, filters: dict, open_only: bool):
+        """공공데이터포털 일반음식점: 100건/페이지 pageNo 기반 페이징.
+        서버가 다중 조건 AND를 지원하므로 모든 조건을 cond[...]로 전달한다."""
+        server_filters = dict(filters)  # 모든 사용자 조건을 서버로
+        if open_only:
+            server_filters["SALS_STTS_CD"] = "01"  # 영업/정상만 서버에서 선필터
+        page_no = 0
+        total = None
+        pages = 1
+        try:
+            while not self._cancel:
+                try:
+                    t, rows = datagokr_fetch(key, server_filters, page_no + 1)
+                except RuntimeError as e:
+                    if page_no == 0:
+                        raise  # 첫 페이지부터 실패 → 전체 오류로 처리
+                    # 이미 일부 페이지를 받은 상태 → 부분 결과 유지하고 경고
+                    self.root.after(0, self._on_done, total or 0, pages, str(e))
+                    return
+                if total is None:
+                    total = t
+                    pages = max(1, (total + DATAGOKR_PAGE_SIZE - 1) // DATAGOKR_PAGE_SIZE)
+                page_no += 1
+                self.root.after(0, self._on_page, total, rows, page_no, pages, open_only)
+
+                if not rows or page_no >= pages:
+                    break
+                # 대량 데이터(2만 건 초과)는 전체 수신 여부를 한 번 확인
+                if page_no == 1 and total > DATAGOKR_CONFIRM_COUNT:
+                    if not self._ask_main(
+                        f"조건과 일치하는 데이터가 {total:,}건({pages}페이지)입니다.\n"
+                        f"공공데이터포털은 100건씩 나눠 받으므로 시간이 오래 걸릴 수 있습니다.\n\n"
+                        f"전체를 수신할까요?\n(아니오: 지금까지 수신분만 표시)"
+                    ):
+                        break
+            self.root.after(0, self._on_done, total or 0, pages)
+        except RuntimeError as e:
+            self.root.after(0, self.on_error, str(e))
+
     def _ask_main(self, msg: str) -> bool:
         """작업 스레드에서 메인 스레드의 확인 대화상자를 띄우고 답을 기다림"""
         ev = threading.Event()
@@ -942,7 +1261,7 @@ class App:
 
         matched = [r for r in rows if row_matches(r, filters)]
         if open_only:
-            matched = [r for r in matched if not (r.get("CLSBIZ_DT") or "").strip()]
+            matched = [r for r in matched if not is_row_closed(info, r)]
 
         self.rows_received += len(rows)
         base = len(self.rows)
@@ -957,14 +1276,14 @@ class App:
                     v = format_date(v)
                 values.append(v)
             tags = ["odd"] if pos % 2 == 1 else []
-            if info["has_clsbiz"] and (row.get("CLSBIZ_DT") or "").strip():
-                tags.append("closed")  # 폐업 업소는 회색으로 표시
+            if is_row_closed(info, row):
+                tags.append("closed")  # 폐업/말소 업소는 회색으로 표시
             item = self.tree.insert("", "end", values=values, tags=tags)
             self._row_by_item[item] = row
 
-        if info["has_clsbiz"]:
+        if supports_open_filter(info):
             self._open_cnt += sum(
-                1 for r in matched if not (r.get("CLSBIZ_DT") or "").strip()
+                1 for r in matched if not is_row_closed(info, r)
             )
         self.rows.extend(matched)
 
@@ -972,7 +1291,7 @@ class App:
         self.kpi_vars["received"].set(f"{self.rows_received:,}")
         self.kpi_vars["matched"].set(f"{len(self.rows):,}")
         self.kpi_vars["open"].set(
-            f"{self._open_cnt:,}" if info["has_clsbiz"] else "해당 없음"
+            f"{self._open_cnt:,}" if supports_open_filter(info) else "해당 없음"
         )
         self._page_info = f"페이지 {page_no}/{pages} 수신, 일치 {len(self.rows):,}건"
 
@@ -1050,7 +1369,7 @@ class App:
         info = SERVICES[self.service_id]
 
         win = tk.Toplevel(self.root)
-        win.title(row.get("BSSH_NM", "상세 정보"))
+        win.title(row.get("BSSH_NM") or row.get("BPLC_NM") or "상세 정보")
         win.geometry("500x440")
         win.configure(bg=C["card"])
         txt = tk.Text(win, wrap="word", font=(FONT, 10), relief="flat", bg=C["card"])
@@ -1105,7 +1424,7 @@ class App:
         for idx, item in enumerate(self.tree.get_children("")):
             tags = ["odd"] if idx % 2 == 1 else []
             row = self._row_by_item.get(item, {})
-            if info["has_clsbiz"] and (row.get("CLSBIZ_DT") or "").strip():
+            if is_row_closed(info, row):
                 tags.append("closed")
             self.tree.item(item, tags=tags)
 
