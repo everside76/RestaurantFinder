@@ -166,6 +166,11 @@ HELP_TEXT = """\
   · 표에는 최대 5,000건까지 표시되며, 전체 결과는 CSV/JSON 저장으로 확인할 수 있습니다.
   · 조건 없이 조회하면 처음 1,000건만 가져옵니다.
 
+■ 'ERROR-500 서버오류' 안내
+  · 식품안전나라(공공데이터) 서버 쪽 오류이며 이 프로그램의 문제가 아닙니다.
+  · 프로그램이 자동으로 몇 차례 재시도하며, 그래도 안 되면 잠시 후 다시 시도하세요.
+  · 하루 호출량이 많으면 일시 제한될 수 있으니, 계속되면 시간을 두고(다음 날) 시도하세요.
+
 ■ 인증키
   · 식품안전나라(foodsafetykorea.go.kr) 회원가입 → 마이페이지 → 오픈API 인증키 발급
   · 'sample' 키는 테스트용: 5건만 반환되고 검색 조건이 적용되지 않습니다.
@@ -284,11 +289,25 @@ def pick_server_filters(filters: dict) -> dict:
     return dict(list(filters.items())[:1])
 
 
-def api_fetch(url: str, service: str, timeout: int = 180, retries: int = 2):
+# 서버 측 일시 오류 코드(재시도 대상). 500=서버오류, 600=DB연결실패, 601=SQL오류
+SERVER_ERROR_CODES = {"ERROR-500", "ERROR-600", "ERROR-601"}
+
+
+def _server_error_message(code: str, msg: str) -> str:
+    return (
+        f"식품안전나라 서버가 응답하지 않습니다 ({code}: {msg or '서버 오류'}).\n\n"
+        "· 이 프로그램이 아니라 공공데이터 API 서버 쪽 문제입니다.\n"
+        "· 잠시 후(수 분~수십 분) 다시 시도해 주세요.\n"
+        "· 계속 반복되면 오늘 호출량이 많아 일시적으로 제한됐을 수 있으니,\n"
+        "  시간을 두고(가능하면 다음 날) 다시 시도하세요."
+    )
+
+
+def api_fetch(url: str, service: str, timeout: int = 180, retries: int = 3):
     """API 호출. (total, rows) 반환, 오류 시 RuntimeError.
-    시간 초과와 인증키 동시접속 거부는 자동 재시도."""
-    data = None
+    시간 초과·동시접속 거부·서버 오류(ERROR-500 등)는 자동 재시도."""
     for attempt in range(retries + 1):
+        last = attempt == retries
         try:
             with urllib.request.urlopen(url, timeout=timeout) as resp:
                 text = resp.read().decode("utf-8", errors="replace")
@@ -296,7 +315,7 @@ def api_fetch(url: str, service: str, timeout: int = 180, retries: int = 2):
             raise RuntimeError(f"HTTP 오류: {e.code} {e.reason}")
         except (TimeoutError, urllib.error.URLError, OSError) as e:
             is_timeout = isinstance(e, TimeoutError) or "timed out" in str(e).lower()
-            if is_timeout and attempt < retries:
+            if is_timeout and not last:
                 continue  # 재시도
             if is_timeout:
                 raise RuntimeError(
@@ -309,14 +328,13 @@ def api_fetch(url: str, service: str, timeout: int = 180, retries: int = 2):
 
         try:
             data = json.loads(text)
-            break
         except json.JSONDecodeError:
             # 서버가 JSON 대신 HTML 안내문(alert)을 보내는 경우
             m = re.search(r"alert\('([^']+)'\)", text)
             msg = m.group(1) if m else ""
             if "접속 중" in msg:
                 # 같은 인증키의 이전 요청이 아직 처리 중 → 잠시 대기 후 재시도
-                if attempt < retries:
+                if not last:
                     time.sleep(3)
                     continue
                 raise RuntimeError(
@@ -332,22 +350,31 @@ def api_fetch(url: str, service: str, timeout: int = 180, retries: int = 2):
                 )
             raise RuntimeError("응답을 JSON으로 해석할 수 없습니다. 인증키를 확인하세요.")
 
-    body = data.get(service)
-    if body is None:
-        result = data.get("RESULT", {})
-        raise RuntimeError(
-            f"{result.get('CODE', '오류')}: "
-            f"{result.get('MSG', '응답 형식이 올바르지 않습니다.')}"
-        )
+        # RESULT 코드는 body 안(정상) 또는 최상위(오류)에 올 수 있음
+        body = data.get(service)
+        result = (body or {}).get("RESULT") or data.get("RESULT", {})
+        code = result.get("CODE", "")
 
-    result = body.get("RESULT", {})
-    code = result.get("CODE", "")
-    if code == "INFO-200":  # 해당하는 데이터가 없음 → 빈 결과로 처리
-        return 0, []
-    if code != "INFO-000":
-        raise RuntimeError(f"{code}: {result.get('MSG', '')}")
+        # 서버 측 일시 오류 → 점증 대기 후 재시도
+        if code in SERVER_ERROR_CODES:
+            if not last:
+                time.sleep(2 * (attempt + 1))
+                continue
+            raise RuntimeError(_server_error_message(code, result.get("MSG", "")))
 
-    return int(body.get("total_count", 0)), body.get("row", [])
+        if code == "INFO-200":  # 해당하는 데이터가 없음 → 빈 결과로 처리
+            return 0, []
+        if body is None:
+            raise RuntimeError(
+                f"{code or '오류'}: {result.get('MSG', '응답 형식이 올바르지 않습니다.')}"
+            )
+        if code and code != "INFO-000":
+            raise RuntimeError(f"{code}: {result.get('MSG', '')}")
+
+        return int(body.get("total_count", 0)), body.get("row", [])
+
+    # 이론상 도달하지 않음 (마지막 시도에서 반환/예외)
+    raise RuntimeError("알 수 없는 오류로 조회에 실패했습니다.")
 
 
 def row_matches(row: dict, filters: dict) -> bool:
@@ -859,7 +886,14 @@ class App:
         try:
             while not self._cancel:
                 url = build_url(key, service, start, start + PAGE_SIZE - 1, server_filters)
-                t, rows = api_fetch(url, service)
+                try:
+                    t, rows = api_fetch(url, service)
+                except RuntimeError as e:
+                    if page_no == 0:
+                        raise  # 첫 페이지부터 실패 → 전체 오류로 처리
+                    # 이미 일부 페이지를 받은 상태 → 부분 결과 유지하고 경고
+                    self.root.after(0, self._on_done, total or 0, pages, str(e))
+                    return
                 if total is None:
                     total = t
                     pages = max(1, (total + PAGE_SIZE - 1) // PAGE_SIZE)
@@ -942,17 +976,30 @@ class App:
         )
         self._page_info = f"페이지 {page_no}/{pages} 수신, 일치 {len(self.rows):,}건"
 
-    def _on_done(self, total: int, pages: int):
+    def _on_done(self, total: int, pages: int, partial_error: str = ""):
         self.stop_progress()
         self.btn_search.config(state="normal")
         self.btn_stop.config(state="disabled")
 
         n = len(self.rows)
-        prefix = "중지됨" if self._cancel else "완료"
+        if partial_error:
+            prefix = "일부만 수신(서버 오류로 중단)"
+        elif self._cancel:
+            prefix = "중지됨"
+        else:
+            prefix = "완료"
         msg = f"{prefix}: 서버 일치 {total:,}건 중 {self.rows_received:,}건 수신 → 조건 일치 {n:,}건"
         if n > MAX_TREE_ROWS:
             msg += f" (표에는 처음 {MAX_TREE_ROWS:,}건만 표시, 전체는 CSV/JSON 저장으로 확인)"
         self.var_status.set(msg)
+
+        if partial_error:
+            messagebox.showwarning(
+                "일부만 수신됨",
+                f"수신 도중 서버 오류가 발생해 중단했습니다.\n"
+                f"지금까지 받은 {n:,}건은 표에 그대로 남아 있습니다.\n\n{partial_error}",
+            )
+            return
 
         if n == 0 and not self._cancel:
             messagebox.showinfo(
