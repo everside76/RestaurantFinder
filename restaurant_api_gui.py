@@ -618,7 +618,7 @@ class App:
         self._key_by_provider = {}        # provider → 입력 중이던 인증키 기억
         self._save_by_provider = {}       # provider → 저장 체크 상태 기억
 
-        root.title("음식점 정보 조회 대시보드 — 식품안전나라 오픈 API")
+        root.title("음식점 정보 조회 대시보드 — 식품안전나라 · 행정안전부 공공데이터")
         root.geometry("1180x740")
         root.minsize(980, 600)
         root.configure(bg=C["bg"])
@@ -716,11 +716,11 @@ class App:
         sb.pack_propagate(False)
 
         tk.Label(
-            sb, text="🍽  FoodSafe", bg=C["sidebar"], fg="white",
-            font=(FONT, 16, "bold"), anchor="w",
+            sb, text="🍽 Restaurant Finder", bg=C["sidebar"], fg="white",
+            font=(FONT, 14, "bold"), anchor="w",
         ).pack(fill="x", padx=20, pady=(24, 0))
         tk.Label(
-            sb, text="Restaurant Finder", bg=C["sidebar"], fg=C["sidebar_dim"],
+            sb, text="식품안전나라 · 행정안전부 공공데이터", bg=C["sidebar"], fg=C["sidebar_dim"],
             font=(FONT, 10), anchor="w",
         ).pack(fill="x", padx=22, pady=(0, 24))
 
@@ -757,7 +757,7 @@ class App:
         help_btn.pack(fill="x", padx=14, pady=(0, 10))
         help_btn.bind("<Button-1>", lambda e: self.show_help())
         tk.Label(
-            bottom, text="식품안전나라 오픈 API\nfoodsafetykorea.go.kr",
+            bottom, text="식품안전나라 · 행정안전부\n공공데이터 오픈 API",
             bg=C["sidebar"], fg=C["sidebar_dim"], font=(FONT, 8), justify="left",
         ).pack(fill="x", padx=20)
 
