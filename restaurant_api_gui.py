@@ -446,6 +446,8 @@ DATAGOKR_COND_OP = {
 
 # 헤더 resultCode 중 일시 오류로 보고 재시도할 코드
 DATAGOKR_RETRY_CODES = {"22"}  # LIMITED_NUMBER_OF_SERVICE_REQUESTS_EXCEEDS
+# 정상 응답 코드 (게이트웨이마다 '00'/'0'/'000'/'INFO-000' 등으로 제각각)
+DATAGOKR_SUCCESS_CODES = {"", "0", "00", "000", "0000", "INFO-000"}
 
 
 def _datagokr_normalize_items(items) -> list:
@@ -538,17 +540,25 @@ def datagokr_fetch(key: str, filters: dict, page_no: int,
 
         resp_obj = data.get("response") or {}
         header = resp_obj.get("header") or {}
-        result_code = str(header.get("resultCode", ""))
-        result_msg = header.get("resultMsg", "")
+        result_code = str(header.get("resultCode", "")).strip()
+        result_msg = str(header.get("resultMsg", "")).strip()
+        msg_upper = result_msg.upper()
+        # 코드가 '정상' 계열이거나 메시지가 정상/NORMAL이면 성공으로 간주
+        is_success = (
+            result_code in DATAGOKR_SUCCESS_CODES
+            or "정상" in result_msg
+            or msg_upper.startswith("NORMAL")
+        )
 
-        # '03' 계열은 데이터 없음 → 빈 결과로 처리
-        if result_code in ("03",) or "NODATA" in str(result_msg).upper():
+        # 데이터 없음 → 빈 결과로 처리
+        if "NODATA" in msg_upper or (result_code == "03" and not is_success):
             return 0, []
         # 일시 오류(트래픽 초과 등)는 점증 대기 후 재시도
         if result_code in DATAGOKR_RETRY_CODES and not last:
             time.sleep(2 * (attempt + 1))
             continue
-        if result_code and result_code != "00":
+        # 성공이 아니면서 오류 코드가 있으면 오류로 처리
+        if not is_success and result_code:
             raise RuntimeError(
                 f"공공데이터포털 오류({result_code}): {result_msg or '알 수 없는 오류'}"
             )
