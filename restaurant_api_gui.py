@@ -68,6 +68,30 @@ C = {
 }
 
 SERVICES = {
+    "MOIS_I1": {
+        "name": "일반음식점 (행정안전부)",
+        "desc": "공공데이터포털 · 별도 인증키",
+        "provider": "data_go_kr",  # 행정안전부 일반음식점 조회서비스 (data.go.kr)
+        "columns": {
+            "BPLC_NM": "사업장명",
+            "ROAD_NM_ADDR": "도로명주소",
+            "LOTNO_ADDR": "지번주소",
+            "SALS_STTS_NM": "영업상태",
+            "DTL_SALS_STTS_NM": "상세영업상태",
+            "BZSTAT_SE_NM": "업태",
+            "TELNO": "전화번호",
+            "LCPMT_YMD": "인허가일자",
+            "CLSBIZ_YMD": "폐업일자",
+            "MNG_NO": "관리번호",
+        },
+        # 검색 필드의 값은 응답 필드명(cond 파라미터에 그대로 쓰는 이름)으로 정의
+        "search_fields": {
+            "사업장명": "BPLC_NM",
+            "도로명주소": "ROAD_NM_ADDR",
+        },
+        "default_fields": ["사업장명", "도로명주소"],
+        "has_clsbiz": False,  # 폐업 판정은 영업상태코드로 처리(is_row_closed 참조)
+    },
     "I1200": {
         "name": "식품접객업정보",
         "desc": "전국 음식점 인허가 (약 313만 건)",
@@ -117,30 +141,6 @@ SERVICES = {
         },
         "default_fields": ["업소명", "주소"],
         "has_clsbiz": False,
-    },
-    "MOIS_I1": {
-        "name": "일반음식점 (행정안전부)",
-        "desc": "공공데이터포털 · 별도 인증키",
-        "provider": "data_go_kr",  # 행정안전부 일반음식점 조회서비스 (data.go.kr)
-        "columns": {
-            "BPLC_NM": "사업장명",
-            "ROAD_NM_ADDR": "도로명주소",
-            "LOTNO_ADDR": "지번주소",
-            "SALS_STTS_NM": "영업상태",
-            "DTL_SALS_STTS_NM": "상세영업상태",
-            "BZSTAT_SE_NM": "업태",
-            "TELNO": "전화번호",
-            "LCPMT_YMD": "인허가일자",
-            "CLSBIZ_YMD": "폐업일자",
-            "MNG_NO": "관리번호",
-        },
-        # 검색 필드의 값은 응답 필드명(cond 파라미터에 그대로 쓰는 이름)으로 정의
-        "search_fields": {
-            "사업장명": "BPLC_NM",
-            "도로명주소": "ROAD_NM_ADDR",
-        },
-        "default_fields": ["사업장명", "도로명주소"],
-        "has_clsbiz": False,  # 폐업 판정은 영업상태코드로 처리(is_row_closed 참조)
     },
 }
 
@@ -197,8 +197,9 @@ HELP_TEXT = """\
   · 프로그램이 자동으로 몇 차례 재시도하며, 그래도 안 되면 잠시 후 다시 시도하세요.
   · 하루 호출량이 많으면 일시 제한될 수 있으니, 계속되면 시간을 두고(다음 날) 시도하세요.
 
-■ '일반음식점 (행정안전부)' 데이터셋 — 공공데이터포털(data.go.kr)
-  · 사이드바 세 번째 항목입니다. 식품안전나라와는 별개의 데이터·별개의 인증키를 씁니다.
+■ '일반음식점 (행정안전부)' 데이터셋 — 공공데이터포털(data.go.kr) · 기본 데이터셋
+  · 사이드바 맨 위, 프로그램 시작 시 기본으로 선택되는 데이터셋입니다.
+    식품안전나라와는 별개의 데이터·별개의 인증키를 씁니다.
   · 검색 조건: 사업장명 / 도로명주소 (모두 서버에서 AND로 정확히 처리됩니다.
     식품안전나라와 달리 여러 조건을 서버가 직접 걸러 주므로 자동 필터링 안내가 없습니다.)
   · 영업상태(영업/폐업)를 함께 제공하며, '영업 중인 업소만 표시'를 체크하면
@@ -623,8 +624,10 @@ class App:
         self._cancel = False
         self._open_cnt = 0
         self._open_only_pref = True  # '영업 중만 표시' 기본값
-        self._current_service = "I1200"
-        self._current_provider = "mfds"   # 현재 데이터셋의 제공처
+        self._current_service = "MOIS_I1"
+        # _build_main이 키 UI를 mfds 기준으로 초기화하므로 여기선 mfds로 두고,
+        # 아래 select_service("MOIS_I1")가 data_go_kr로 전환하도록 한다.
+        self._current_provider = "mfds"
         self._key_by_provider = {}        # provider → 입력 중이던 인증키 기억
         self._save_by_provider = {}       # provider → 저장 체크 상태 기억
 
@@ -642,7 +645,7 @@ class App:
         self._init_styles()
         self._build_sidebar()
         self._build_main()
-        self.select_service("I1200", initial=True)
+        self.select_service("MOIS_I1", initial=True)
 
     def _sync_ime_font(self):
         """Windows 한글 IME 조합 글자가 입력칸 폰트보다 커 보이는 문제 방지.
