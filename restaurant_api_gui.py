@@ -730,9 +730,9 @@ class App:
             font=(FONT, 14, "bold"), anchor="w",
         ).pack(fill="x", padx=20, pady=(24, 0))
         tk.Label(
-            sb, text="식품안전나라 · 행정안전부 공공데이터", bg=C["sidebar"], fg=C["sidebar_dim"],
-            font=(FONT, 10), anchor="w",
-        ).pack(fill="x", padx=22, pady=(0, 24))
+            sb, text="식품안전나라 · 행정안전부\n공공데이터 오픈 API", bg=C["sidebar"],
+            fg=C["sidebar_dim"], font=(FONT, 9), anchor="w", justify="left",
+        ).pack(fill="x", padx=22, pady=(0, 22))
 
         tk.Label(
             sb, text="데이터셋", bg=C["sidebar"], fg=C["sidebar_dim"],
