@@ -91,6 +91,7 @@ SERVICES = {
         },
         "default_fields": ["사업장명", "도로명주소"],
         "has_clsbiz": False,  # 폐업 판정은 영업상태코드로 처리(is_row_closed 참조)
+        "default_sort": "LCPMT_YMD",  # 조회 시 인허가일자 최근순으로 기본 정렬
     },
     "I1200": {
         "name": "식품접객업정보",
@@ -117,6 +118,7 @@ SERVICES = {
         },
         "default_fields": ["업소명", "소재지 주소"],  # 기본으로 선택해 둘 조건 필드
         "has_clsbiz": True,  # 폐업일자 필드 보유 → '영업 중만' 필터 지원
+        "default_sort": "PRMS_DT",  # 조회 시 인허가일자 최근순으로 기본 정렬
     },
     "I2861": {
         "name": "인허가 변경 정보",
@@ -1325,6 +1327,12 @@ class App:
             msg += f" (표에는 처음 {MAX_TREE_ROWS:,}건만 표시, 전체는 CSV/JSON 저장으로 확인)"
         self.var_status.set(msg)
 
+        # 사용자가 직접 정렬하지 않았으면 인허가일자 최근순으로 기본 정렬
+        info = SERVICES[self.service_id]
+        default_sort = info.get("default_sort")
+        if n and self._sort_field is None and default_sort in info["columns"]:
+            self._sort_by(default_sort, desc=True)
+
         if partial_error:
             messagebox.showwarning(
                 "일부만 수신됨",
@@ -1393,38 +1401,41 @@ class App:
         txt.config(state="disabled")
 
     # ── 정렬 ────────────────────────────────
-    def _sort_by(self, field: str):
-        """헤더 클릭 → 해당 필드 기준 정렬 (같은 필드 재클릭 시 오름/내림 토글)."""
+    def _sort_by(self, field: str, desc: bool = None):
+        """해당 필드 기준 정렬.
+        desc=None(헤더 클릭): 같은 필드 재클릭 시 오름/내림 토글.
+        desc 지정(기본 정렬 등): 방향을 명시적으로 설정."""
         items = list(self.tree.get_children(""))
         if not items:
             return
-        if self._sort_field == field:
+        if desc is not None:
+            self._sort_field = field
+            self._sort_desc = desc
+        elif self._sort_field == field:
             self._sort_desc = not self._sort_desc
         else:
             self._sort_field = field
             self._sort_desc = False
 
         def key(item):
-            raw = (self.tree.set(item, field) or "").strip()
-            return raw
+            return (self.tree.set(item, field) or "").strip()
 
-        vals = [key(it) for it in items]
-        # 값이 모두 숫자로 해석되면 숫자 정렬, 아니면 문자열 정렬. 빈 값은 항상 뒤로.
         def as_num(s):
             try:
                 return float(s.replace(",", ""))
             except ValueError:
                 return None
-        numeric = all(as_num(v) is not None for v in vals if v)
 
-        def sort_key(item):
-            v = key(item)
-            empty = 1 if v == "" else 0  # 빈 값은 뒤로
-            if numeric:
-                return (empty, as_num(v) if v else 0.0)
-            return (empty, v)
+        nonempty = [it for it in items if key(it) != ""]
+        empties = [it for it in items if key(it) == ""]
+        numeric = all(as_num(key(it)) is not None for it in nonempty)
 
-        ordered = sorted(items, key=sort_key, reverse=self._sort_desc)
+        nonempty.sort(
+            key=(lambda it: as_num(key(it))) if numeric else (lambda it: key(it)),
+            reverse=self._sort_desc,
+        )
+        # 빈 값은 정렬 방향과 무관하게 항상 뒤로
+        ordered = nonempty + empties
         for idx, item in enumerate(ordered):
             self.tree.move(item, "", idx)
 
