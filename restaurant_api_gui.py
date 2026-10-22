@@ -120,30 +120,6 @@ SERVICES = {
         "has_clsbiz": True,  # 폐업일자 필드 보유 → '영업 중만' 필터 지원
         "default_sort": "PRMS_DT",  # 조회 시 인허가일자 최근순으로 기본 정렬
     },
-    "I2861": {
-        "name": "인허가 변경 정보",
-        "desc": "음식점업소 변경 이력",
-        "provider": "mfds",  # 식품안전나라(foodsafetykorea.go.kr) 오픈 API
-        "columns": {
-            "BSSH_NM": "업소명",
-            "SITE_ADDR": "주소",
-            "INDUTY_CD_NM": "업종",
-            "CHNG_PRVNS": "변경사유",
-            "CHNG_BF_CN": "변경 전",
-            "CHNG_AF_CN": "변경 후",
-            "CHNG_DT": "변경일",
-            "LCNS_NO": "인허가번호",
-        },
-        "search_fields": {
-            "업소명": "BSSH_NM",
-            "주소": "SITE_ADDR",
-            "변경 전 내용(대표자 등)": "CHNG_BF_CN",
-            "변경 후 내용(대표자 등)": "CHNG_AF_CN",
-            "인허가번호": "LCNS_NO",
-        },
-        "default_fields": ["업소명", "주소"],
-        "has_clsbiz": False,
-    },
 }
 
 HELP_TEXT = """\
@@ -329,9 +305,9 @@ def build_url(key: str, service: str, start: int, end: int, filters: dict) -> st
 # 서버는 다중 조건을 정확히 AND 처리하지 못하고, '서울'처럼 대상이 많은
 # 광범위한 조건은 처리 시간이 매우 길어 시간 초과가 잦다.
 FIELD_SELECTIVITY = [
-    "LCNS_NO", "BSSH_NM", "PRSDNT_NM", "CHNG_BF_CN", "CHNG_AF_CN", "TELNO",
-    "INDUTY_NM", "INDUTY_CD_NM", "INSTT_NM", "CHNG_PRVNS",
-    "LOCP_ADDR", "SITE_ADDR", "SIGNGU_NM",
+    "LCNS_NO", "BSSH_NM", "PRSDNT_NM", "TELNO",
+    "INDUTY_NM", "INSTT_NM",
+    "LOCP_ADDR", "SIGNGU_NM",
 ]
 
 
@@ -1086,7 +1062,7 @@ class App:
         self.tree["columns"] = list(columns.keys())
         for field, label in columns.items():
             width = 95 if field.endswith(("_DT", "YMD")) or field == "YEAR" else 130
-            if field in ("SITE_ADDR", "LOCP_ADDR", "BSSH_NM",
+            if field in ("LOCP_ADDR", "BSSH_NM",
                          "ROAD_NM_ADDR", "LOTNO_ADDR", "BPLC_NM"):
                 width = 240
             if field == "PRSDNT_NM":
