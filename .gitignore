@@ -13,3 +13,9 @@ __pycache__/
 # 조회 결과물
 result.json
 *.csv
+
+# 자동 업데이트 잔여 파일 (교체 전/후 exe, 다운로드 임시 파일)
+*.new.exe
+*.old.exe
+*.old-*.exe
+*.part

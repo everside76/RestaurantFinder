@@ -11,8 +11,11 @@
 import base64
 import ctypes
 import ctypes.wintypes
+import hashlib
 import json
+import os
 import re
+import subprocess
 import sys
 import threading
 import time
@@ -23,6 +26,14 @@ from pathlib import Path
 
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
+
+# ── 버전 / 자동 업데이트 ──────────────────────────
+# 프로그램 버전의 단일 출처. release.ps1이 릴리스 시 이 줄을 정규식으로 교체한다.
+APP_VERSION = "1.0.0"
+UPDATE_REPO = "everside76/RestaurantFinder"   # GitHub 저장소 (owner/repo)
+EXE_ASSET_NAME = "RestaurantFinder.exe"       # 릴리스 에셋 중 내려받을 exe 이름
+UPDATE_API_URL = f"https://api.github.com/repos/{UPDATE_REPO}/releases/latest"
+UPDATE_USER_AGENT = f"RestaurantFinder-Updater/{APP_VERSION}"
 
 # 정식 인증키는 HTTP 호출 시 오류가 발생하므로 반드시 HTTPS 사용
 BASE_URL = "https://openapi.foodsafetykorea.go.kr/api"
@@ -194,6 +205,20 @@ HELP_TEXT = """\
     - 반드시 Decoding 키를 입력해야 합니다(Encoding 키를 넣으면 인증 오류가 납니다).
     - 활용신청 승인 직후에는 반영에 시간이 걸릴 수 있습니다(수십 분~1시간).
   · [저장(암호화)] 체크 시 각 키가 Windows 계정에 묶인 암호화(DPAPI)로 따로 저장됩니다.
+
+■ 자동 업데이트
+  · 프로그램을 시작하고 몇 초 뒤 GitHub 릴리스에서 새 버전이 있는지 자동으로 확인합니다.
+    (인터넷 연결이 없거나 확인에 실패해도 조용히 넘어가며, 조회 기능에는 영향이 없습니다.)
+  · 새 버전이 있으면 백그라운드에서 자동으로 내려받고, 아래 상태줄에 진행률(%)이 표시됩니다.
+    내려받은 파일은 크기와 SHA-256 해시로 검증한 뒤에만 사용합니다.
+  · 다운로드가 끝나면 적용 방법을 묻습니다.
+    - [예]   : 즉시 재시작하여 새 버전을 적용합니다.
+    - [아니오]: 지금은 계속 사용하고, 프로그램을 닫을 때 자동으로 적용합니다.
+    - 조회가 진행 중일 때는 결과를 잃지 않도록 재시작하지 않고 '닫을 때 적용'으로 전환합니다.
+  · 사이드바 아래의 [🔄 업데이트 확인] 버튼으로 언제든 직접 확인할 수 있습니다.
+    (현재 버전은 그 아래 v 숫자로 표시됩니다.)
+  · 업데이트는 실행 파일(RestaurantFinder.exe)만 교체합니다. exe 옆 config.json에
+    저장된 인증키는 그대로 유지되므로 다시 입력할 필요가 없습니다.
 """
 
 
@@ -585,6 +610,305 @@ def format_date(value: str) -> str:
     return value or ""
 
 
+# ── 자동 업데이트 (GitHub Releases) ─────────────────
+# 주의: 업데이트는 실행 파일(exe)만 교체하며 config.json(암호화된 인증키)은
+#       읽지도, 쓰지도, 옮기지도 않는다. 단위 테스트에서 목으로 바꿀 수 있도록
+#       urllib.request.urlopen / subprocess.Popen 을 모듈 경로 그대로 참조한다.
+
+class UpdateCheckError(Exception):
+    """업데이트 확인 실패의 기본 예외 (수동 확인 시 메시지로 표시)."""
+
+
+class UpdateNoReleaseError(UpdateCheckError):
+    """저장소에 아직 릴리스가 없음 (HTTP 404)."""
+
+
+class UpdateRateLimitError(UpdateCheckError):
+    """GitHub API 호출 한도 초과 (HTTP 403/429)."""
+
+
+class UpdateNetworkError(UpdateCheckError):
+    """네트워크 연결 실패·시간 초과."""
+
+
+def parse_version(text) -> tuple:
+    """'v1.10.0' → (1, 10). 앞의 v 제거, 각 마디의 앞자리 숫자만 사용.
+    끝의 0 마디는 제거하여 '1.0' 과 '1.0.0' 을 같은 버전으로 취급한다."""
+    s = str(text or "").strip().lstrip("vV")
+    s = re.split(r"[-+ ]", s, maxsplit=1)[0]  # 1.2.3-beta, 1.2.3+build 꼬리 제거
+    parts = []
+    for piece in s.split("."):
+        m = re.match(r"\d+", piece)
+        parts.append(int(m.group(0)) if m else 0)
+    while parts and parts[-1] == 0:
+        parts.pop()
+    return tuple(parts)
+
+
+def is_newer_version(remote: str, local: str = APP_VERSION) -> bool:
+    """remote가 local보다 높은 버전이면 True."""
+    return parse_version(remote) > parse_version(local)
+
+
+def check_latest_release(timeout=10, current_version: str = APP_VERSION):
+    """GitHub 최신 릴리스를 확인한다.
+    새 버전이고 EXE_ASSET_NAME 에셋이 있으면 dict(version, tag, notes, asset_url,
+    size, digest, html_url)를, 아니면 None을 반환한다.
+    실패 시 UpdateCheckError 계열 예외를 던진다(호출부가 종류별로 구분)."""
+    req = urllib.request.Request(
+        UPDATE_API_URL,
+        headers={
+            "User-Agent": UPDATE_USER_AGENT,
+            "Accept": "application/vnd.github+json",
+            "X-GitHub-Api-Version": "2022-11-28",
+        },
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            text = resp.read().decode("utf-8", errors="replace")
+    except urllib.error.HTTPError as e:
+        if e.code == 404:
+            raise UpdateNoReleaseError("아직 게시된 릴리스가 없습니다.") from e
+        remaining = ""
+        try:
+            remaining = (e.headers or {}).get("X-RateLimit-Remaining", "") or ""
+        except Exception:
+            remaining = ""
+        if e.code == 429 or (e.code == 403 and str(remaining).strip() == "0"):
+            raise UpdateRateLimitError(
+                "GitHub 업데이트 서버 호출 한도를 초과했습니다. 잠시 후(최대 1시간) 다시 시도하세요."
+            ) from e
+        raise UpdateCheckError(f"업데이트 서버 오류: HTTP {e.code} {e.reason}") from e
+    except (TimeoutError, urllib.error.URLError, OSError) as e:
+        raise UpdateNetworkError(f"업데이트 서버에 연결할 수 없습니다: {e}") from e
+
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError as e:
+        raise UpdateCheckError("업데이트 서버 응답을 해석할 수 없습니다.") from e
+    if not isinstance(data, dict):
+        raise UpdateCheckError("업데이트 서버 응답 형식이 올바르지 않습니다.")
+
+    tag = str(data.get("tag_name") or "").strip()
+    if not tag:
+        raise UpdateCheckError("릴리스에 버전 태그가 없습니다.")
+    version = tag.lstrip("vV")
+    if data.get("draft") or data.get("prerelease"):
+        return None
+    if not is_newer_version(version, current_version):
+        return None
+
+    asset = None
+    for a in data.get("assets") or []:
+        if isinstance(a, dict) and a.get("name") == EXE_ASSET_NAME:
+            asset = a
+            break
+    if asset is None or not asset.get("browser_download_url"):
+        return None  # 실행 파일이 첨부되지 않은 릴리스는 무시
+
+    try:
+        size = int(asset.get("size") or 0)
+    except (TypeError, ValueError):
+        size = 0
+    return {
+        "version": version,
+        "tag": tag,
+        "notes": str(data.get("body") or ""),
+        "asset_url": asset["browser_download_url"],
+        "size": size,
+        "digest": str(asset.get("digest") or ""),
+        "html_url": str(data.get("html_url") or ""),
+    }
+
+
+def download_update(info: dict, dest_path, progress_cb=None, timeout=60,
+                    chunk_size=64 * 1024) -> Path:
+    """info["asset_url"]을 dest_path로 내려받는다(임시명 dest.part → 검증 후 rename).
+    progress_cb(받은바이트, 전체바이트)를 청크마다 호출한다.
+    크기·SHA-256(digest가 'sha256:<hex>'일 때) 불일치 또는 오류 시 파일을 지우고 RuntimeError."""
+    dest = Path(dest_path)
+    part = dest.with_name(dest.name + ".part")
+    expected_size = int(info.get("size") or 0)
+    digest = str(info.get("digest") or "").strip()
+    expected_sha = ""
+    if digest.lower().startswith("sha256:"):
+        expected_sha = digest.split(":", 1)[1].strip().lower()
+
+    def _remove(p: Path):
+        try:
+            if p.exists():
+                p.unlink()
+        except OSError:
+            pass
+
+    sha = hashlib.sha256()
+    received = 0
+    try:
+        req = urllib.request.Request(
+            info["asset_url"],
+            headers={"User-Agent": UPDATE_USER_AGENT, "Accept": "application/octet-stream"},
+        )
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            total = expected_size
+            if not total:
+                try:
+                    total = int(resp.headers.get("Content-Length") or 0)
+                except (TypeError, ValueError, AttributeError):
+                    total = 0
+            with open(part, "wb") as f:
+                while True:
+                    chunk = resp.read(chunk_size)
+                    if not chunk:
+                        break
+                    f.write(chunk)
+                    sha.update(chunk)
+                    received += len(chunk)
+                    if progress_cb is not None:
+                        progress_cb(received, total)
+    except Exception as e:
+        _remove(part)
+        if isinstance(e, RuntimeError):
+            raise
+        raise RuntimeError(f"업데이트 파일 다운로드 실패: {e}") from e
+
+    if expected_size and received != expected_size:
+        _remove(part)
+        raise RuntimeError(
+            f"다운로드한 파일 크기가 다릅니다 (예상 {expected_size:,}바이트, 실제 {received:,}바이트)."
+        )
+    if received == 0:
+        _remove(part)
+        raise RuntimeError("다운로드한 파일이 비어 있습니다.")
+    if expected_sha and sha.hexdigest().lower() != expected_sha:
+        _remove(part)
+        raise RuntimeError("다운로드한 파일의 SHA-256 해시가 일치하지 않습니다 (파일 손상 가능).")
+
+    try:
+        os.replace(part, dest)  # 기존 dest가 있으면 덮어씀
+    except OSError as e:
+        _remove(part)
+        raise RuntimeError(f"다운로드한 파일을 저장할 수 없습니다: {e}") from e
+    return dest
+
+
+def old_exe_path(exe_path) -> Path:
+    """교체 시 현재 exe를 옮겨 둘 경로: RestaurantFinder.exe → RestaurantFinder.old.exe"""
+    p = Path(exe_path)
+    return p.with_name(f"{p.stem}.old{p.suffix}")
+
+
+def new_exe_path(exe_path) -> Path:
+    """새 버전을 내려받을 경로: RestaurantFinder.exe → RestaurantFinder.new.exe"""
+    p = Path(exe_path)
+    return p.with_name(f"{p.stem}.new{p.suffix}")
+
+
+def _child_env() -> dict:
+    """재시작할 새 exe에 넘길 환경 변수.
+    PyInstaller onefile 부모의 임시 폴더(_MEIxxxx)를 재사용하지 않고
+    독립된 새 인스턴스로 시작하도록 PyInstaller 내부 변수를 정리한다."""
+    env = dict(os.environ)
+    env["PYINSTALLER_RESET_ENVIRONMENT"] = "1"  # PyInstaller 6.9+ 공식 방법
+    for k in list(env):
+        if k.startswith("_PYI_") or k in ("_MEIPASS2",):
+            env.pop(k, None)
+    meipass = getattr(sys, "_MEIPASS", None)
+    if meipass:
+        # tkinter 런타임 훅이 설정한 TCL/TK 경로가 부모 임시 폴더를 가리키면 제거
+        for k in ("TCL_LIBRARY", "TK_LIBRARY"):
+            v = env.get(k, "")
+            if v and os.path.normcase(v).startswith(os.path.normcase(meipass)):
+                env.pop(k, None)
+    return env
+
+
+def apply_update(current_exe, new_exe, relaunch=True):
+    """실행 중인 exe를 새 exe로 교체한다. (Windows는 실행 중인 exe의 이름 변경을 허용)
+    1) current → <이름>.old.exe  2) new → current  3) relaunch면 새 exe 실행.
+    중간에 실패하면 원래 상태로 롤백을 시도한 뒤 RuntimeError.
+    config.json 등 exe 이외의 파일은 건드리지 않는다."""
+    cur = Path(current_exe)
+    new = Path(new_exe)
+    old = old_exe_path(cur)
+    if not new.is_file():
+        raise RuntimeError(f"새 버전 파일이 없습니다: {new.name}")
+    if not cur.is_file():
+        raise RuntimeError(f"현재 실행 파일을 찾을 수 없습니다: {cur.name}")
+
+    # 이전 업데이트에서 남은 .old.exe 정리 (아직 실행 중이면 지워지지 않을 수 있음)
+    if old.exists():
+        try:
+            old.unlink()
+        except OSError:
+            # 지울 수 없으면 고유한 이름으로 비켜 둔다 (다음 시작 시 정리)
+            old = cur.with_name(f"{cur.stem}.old-{int(time.time())}{cur.suffix}")
+
+    # 1) 현재 exe를 .old로 이동
+    try:
+        os.rename(cur, old)
+    except OSError as e:
+        raise RuntimeError(f"현재 실행 파일 이름을 바꿀 수 없습니다: {e}") from e
+
+    # 2) 새 exe를 현재 경로로 이동
+    try:
+        os.rename(new, cur)
+    except OSError as e:
+        try:
+            os.rename(old, cur)  # 롤백
+        except OSError:
+            pass
+        raise RuntimeError(f"새 버전으로 교체하지 못했습니다(원래 버전으로 복구): {e}") from e
+
+    # 3) 새 버전 실행
+    if relaunch:
+        flags = (getattr(subprocess, "DETACHED_PROCESS", 0x00000008)
+                 | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200))
+        try:
+            subprocess.Popen(
+                [str(cur)], close_fds=True, creationflags=flags,
+                cwd=str(cur.parent), env=_child_env(),
+            )
+        except Exception as e:
+            # 새 버전을 실행할 수 없음 → 원상복구 (cur→new, old→cur)
+            try:
+                os.rename(cur, new)
+                os.rename(old, cur)
+            except OSError:
+                pass
+            raise RuntimeError(f"새 버전을 실행하지 못했습니다(원래 버전으로 복구): {e}") from e
+    return True
+
+
+def cleanup_old_exe(exe_path=None, include_new=True) -> list:
+    """exe 옆에 남은 업데이트 잔여 파일을 지운다(실패는 무시). 지운 파일 목록 반환.
+    - <이름>.old.exe, <이름>.old-*.exe : 이전 버전 (이전 프로세스 종료 중이면 실패할 수 있음)
+    - include_new=True면 <이름>.new.exe, <이름>.new.exe.part 도 삭제
+      (다운로드 결과는 세션 메모리에만 보관하므로, 시작 시 남은 파일은 버리고 다시 확인)
+    exe_path가 없으면 frozen(PyInstaller) 실행일 때만 sys.executable 기준으로 동작."""
+    if exe_path is None:
+        if not getattr(sys, "frozen", False):
+            return []
+        exe_path = sys.executable
+    exe = Path(exe_path)
+    targets = [old_exe_path(exe)]
+    try:
+        targets += sorted(exe.parent.glob(f"{exe.stem}.old-*{exe.suffix}"))
+    except OSError:
+        pass
+    if include_new:
+        newp = new_exe_path(exe)
+        targets += [newp, newp.with_name(newp.name + ".part")]
+    removed = []
+    for t in targets:
+        try:
+            if t.is_file() and t.resolve() != exe.resolve():
+                t.unlink()
+                removed.append(t)
+        except OSError:
+            pass
+    return removed
+
+
 # ── GUI ─────────────────────────────────────────
 class App:
     def __init__(self, root: tk.Tk):
@@ -624,6 +948,17 @@ class App:
         self._build_sidebar()
         self._build_main()
         self.select_service("MOIS_I1", initial=True)
+
+        # 자동 업데이트 상태 (이 세션 메모리에만 보관)
+        self._upd_state = "idle"      # idle | checking | downloading | ready
+        self._upd_info = None         # check_latest_release 결과 dict
+        self._upd_path = None         # 검증 완료된 새 exe 경로(Path)
+        self._upd_percent = -1
+        self._upd_on_close = False    # 닫을 때 적용 예약 여부
+        try:
+            self._init_updater()
+        except Exception:
+            pass  # 업데이트 기능 오류가 본 기능을 막지 않도록 격리
 
     def _sync_ime_font(self):
         """Windows 한글 IME 조합 글자가 입력칸 폰트보다 커 보이는 문제 방지.
@@ -747,10 +1082,22 @@ class App:
         )
         help_btn.pack(fill="x", padx=14, pady=(0, 10))
         help_btn.bind("<Button-1>", lambda e: self.show_help())
+        # 업데이트 확인 버튼 (도움말 버튼과 같은 스타일, 한 단계 작게)
+        self.btn_update = tk.Label(
+            bottom, text="🔄  업데이트 확인", bg=C["sidebar_hi"], fg=C["sidebar_tx"],
+            font=(FONT, 9, "bold"), pady=6, cursor="hand2",
+        )
+        self.btn_update.pack(fill="x", padx=14, pady=(0, 10))
+        self.btn_update.bind("<Button-1>", lambda e: self.check_for_update(manual=True))
         tk.Label(
             bottom, text="식품안전나라 · 행정안전부\n공공데이터 오픈 API",
             bg=C["sidebar"], fg=C["sidebar_dim"], font=(FONT, 8), justify="left",
         ).pack(fill="x", padx=20)
+        # 현재 버전 표시
+        tk.Label(
+            bottom, text=f"v{APP_VERSION}", bg=C["sidebar"], fg=C["sidebar_dim"],
+            font=(FONT, 8), anchor="w",
+        ).pack(fill="x", padx=20, pady=(4, 0))
 
     def _highlight_sidebar(self, active_sid: str):
         for sid, (btn, lbl1, lbl2) in self.side_btns.items():
@@ -954,6 +1301,11 @@ class App:
             bottom, text="JSON으로 저장", command=self.save_json, bg="#E5E7EB", fg=C["text"],
             font=(FONT, 9), relief="flat", padx=12, pady=4, cursor="hand2",
         ).pack(side="right")
+        # 업데이트 상태(다운로드 진행률 등) — 조회 상태 문구와 겹치지 않도록 별도 칸
+        self.var_update = tk.StringVar(value="")
+        tk.Label(
+            bottom, textvariable=self.var_update, bg=C["bg"], fg=C["accent"], font=(FONT, 9),
+        ).pack(side="right", padx=(0, 12))
 
     # ── 동작 ────────────────────────────────
     @property
@@ -1481,6 +1833,262 @@ class App:
             "\n".join(col_vals),
             f"'{self._base_headings.get(field, field)}' 열 {len(col_vals)}건",
         )
+
+    # ── 자동 업데이트 ─────────────────────────
+    @staticmethod
+    def _is_frozen() -> bool:
+        return bool(getattr(sys, "frozen", False))
+
+    def _is_searching(self) -> bool:
+        """조회(수신) 진행 중인지. 조회 중에는 [조회] 버튼이 비활성화된다."""
+        try:
+            return str(self.btn_search.cget("state")) == "disabled"
+        except Exception:
+            return False
+
+    def _post(self, fn, *args):
+        """작업 스레드 → 메인 스레드로 tkinter 호출 전달 (창이 닫혔으면 무시)."""
+        try:
+            self.root.after(0, fn, *args)
+        except Exception:
+            pass
+
+    def _set_update_status(self, text: str):
+        try:
+            self.var_update.set(text)
+        except Exception:
+            pass
+
+    def _init_updater(self):
+        """시작 시 잔여 파일 정리 + 약 2초 뒤 자동 업데이트 확인 예약."""
+        if self._is_frozen():
+            cleanup_old_exe(include_new=True)
+            # 이전 프로세스가 아직 종료 중이면 .old.exe 삭제가 실패하므로 몇 초 뒤 한 번 더
+            # (이때는 진행 중일 수 있는 새 다운로드 파일을 건드리지 않도록 old만 정리)
+            self.root.after(5000, lambda: self._safe(cleanup_old_exe, None, False))
+        self.root.after(2000, lambda: self.check_for_update(manual=False))
+
+    @staticmethod
+    def _safe(fn, *args):
+        try:
+            return fn(*args)
+        except Exception:
+            return None
+
+    def check_for_update(self, manual: bool = False):
+        """업데이트 확인 시작(백그라운드 스레드). manual=True면 결과를 대화상자로 알림."""
+        try:
+            state = self._upd_state
+            if state == "checking":
+                if manual:
+                    messagebox.showinfo("업데이트 확인", "업데이트를 확인하는 중입니다. 잠시만 기다려 주세요.")
+                return
+            if state == "downloading":
+                if manual:
+                    pct = f" ({self._upd_percent}%)" if self._upd_percent >= 0 else ""
+                    messagebox.showinfo("업데이트 확인", f"새 버전을 내려받는 중입니다{pct}.")
+                return
+            if state == "ready" and self._upd_info and self._upd_path:
+                if manual:
+                    self._prompt_apply()
+                return
+            self._upd_state = "checking"
+            if manual:
+                self._set_update_status("업데이트 확인 중...")
+            threading.Thread(
+                target=self._update_check_worker, args=(manual,), daemon=True
+            ).start()
+        except Exception as e:
+            self._upd_state = "idle"
+            if manual:
+                messagebox.showerror("업데이트 확인", f"업데이트 확인을 시작하지 못했습니다.\n{e}")
+
+    def _update_check_worker(self, manual: bool):
+        try:
+            info = check_latest_release()
+        except Exception as e:
+            self._post(self._on_update_check_error, e, manual)
+            return
+        self._post(self._on_update_checked, info, manual)
+
+    def _on_update_check_error(self, err: Exception, manual: bool):
+        self._upd_state = "idle"
+        self._set_update_status("")
+        if not manual:
+            return  # 자동 확인 실패는 조용히 무시
+        if isinstance(err, UpdateNoReleaseError):
+            messagebox.showinfo(
+                "업데이트 확인",
+                f"아직 게시된 릴리스가 없습니다.\n현재 버전: v{APP_VERSION}",
+            )
+        elif isinstance(err, UpdateRateLimitError):
+            messagebox.showwarning("업데이트 확인", str(err))
+        elif isinstance(err, UpdateNetworkError):
+            messagebox.showwarning(
+                "업데이트 확인",
+                "업데이트 서버에 연결할 수 없습니다.\n인터넷 연결을 확인한 뒤 다시 시도하세요.\n\n"
+                f"({err})",
+            )
+        elif isinstance(err, UpdateCheckError):
+            messagebox.showwarning("업데이트 확인", str(err))
+        else:
+            messagebox.showerror("업데이트 확인", f"업데이트 확인 중 오류가 발생했습니다.\n{err}")
+
+    def _on_update_checked(self, info, manual: bool):
+        try:
+            if not info:
+                self._upd_state = "idle"
+                self._set_update_status("")
+                if manual:
+                    messagebox.showinfo("업데이트 확인", f"최신 버전입니다(v{APP_VERSION}).")
+                return
+
+            ver = info["version"]
+            if not self._is_frozen():
+                # 소스 실행: 다운로드/교체하지 않고 안내만
+                self._upd_state = "idle"
+                self._set_update_status(f"새 버전 v{ver} 있음 (소스 실행 중이라 자동 적용 안 함)")
+                if manual:
+                    messagebox.showinfo(
+                        "업데이트 확인",
+                        f"새 버전 v{ver} 이(가) 있습니다. (현재 v{APP_VERSION})\n\n"
+                        "소스(.py)로 실행 중이므로 자동 업데이트를 적용하지 않습니다.\n"
+                        f"{info.get('html_url') or 'GitHub 릴리스 페이지'}에서 확인하세요.",
+                    )
+                return
+
+            # 실행 파일: exe 옆 <이름>.new.exe 로 자동 다운로드
+            self._upd_info = info
+            self._upd_state = "downloading"
+            self._upd_percent = -1
+            self._set_update_status(f"새 버전 v{ver} 다운로드 준비 중...")
+            dest = new_exe_path(sys.executable)
+            threading.Thread(
+                target=self._update_download_worker, args=(info, dest, manual), daemon=True
+            ).start()
+        except Exception as e:
+            self._upd_state = "idle"
+            self._set_update_status("")
+            if manual:
+                messagebox.showerror("업데이트", f"업데이트 처리 중 오류가 발생했습니다.\n{e}")
+
+    def _update_download_worker(self, info: dict, dest, manual: bool):
+        def progress(done, total):
+            if total:
+                pct = min(100, int(done * 100 / total))
+                if pct != self._upd_percent:  # 1% 단위로만 화면 갱신
+                    self._upd_percent = pct
+                    self._post(self._set_update_status,
+                               f"업데이트 v{info['version']} 다운로드 중... {pct}%")
+            else:
+                self._post(self._set_update_status,
+                           f"업데이트 v{info['version']} 다운로드 중... {done // 1024:,}KB")
+
+        try:
+            path = download_update(info, dest, progress_cb=progress)
+        except Exception as e:
+            self._post(self._on_update_download_error, e, manual)
+            return
+        self._post(self._on_update_downloaded, info, path)
+
+    def _on_update_download_error(self, err: Exception, manual: bool):
+        self._upd_state = "idle"
+        self._upd_info = None
+        self._upd_path = None
+        self._set_update_status("업데이트 다운로드 실패" if not manual else "")
+        if manual:
+            messagebox.showwarning("업데이트", f"새 버전을 내려받지 못했습니다.\n\n{err}")
+
+    def _on_update_downloaded(self, info: dict, path):
+        self._upd_state = "ready"
+        self._upd_info = info
+        self._upd_path = Path(path)
+        self._set_update_status(f"새 버전 v{info['version']} 준비 완료")
+        self._prompt_apply()
+
+    @staticmethod
+    def _notes_excerpt(notes: str, max_lines: int = 8, max_chars: int = 400) -> str:
+        text = (notes or "").replace("\r\n", "\n").strip()
+        if not text:
+            return ""
+        lines = text.split("\n")
+        cut = "\n".join(lines[:max_lines])
+        if len(cut) > max_chars:
+            cut = cut[:max_chars].rstrip()
+        if cut != text:
+            cut += "\n…"
+        return cut
+
+    def _prompt_apply(self):
+        """다운로드·검증 완료 후 적용 방법을 묻는다."""
+        try:
+            info = self._upd_info or {}
+            ver = info.get("version", "?")
+            notes = self._notes_excerpt(info.get("notes", ""))
+            msg = f"새 버전 v{ver} 준비 완료 (현재 v{APP_VERSION})\n"
+            if notes:
+                msg += f"\n[릴리스 노트]\n{notes}\n"
+            msg += (
+                "\n지금 재시작해서 적용할까요?\n"
+                "(아니오: 프로그램을 닫을 때 자동 적용)\n\n"
+                "※ 저장된 인증키(config.json)는 그대로 유지됩니다."
+            )
+            if messagebox.askyesno("업데이트 준비 완료", msg):
+                self._apply_now()
+            else:
+                self._arm_apply_on_close()
+        except Exception as e:
+            self._arm_apply_on_close()
+            messagebox.showwarning("업데이트", f"업데이트 안내 중 오류가 발생했습니다. 닫을 때 적용합니다.\n{e}")
+
+    def _arm_apply_on_close(self):
+        """창을 닫을 때(WM_DELETE_WINDOW) 새 버전을 적용하도록 예약."""
+        self._upd_on_close = True
+        ver = (self._upd_info or {}).get("version", "")
+        self._set_update_status(f"새 버전 v{ver}: 프로그램을 닫을 때 적용됩니다")
+        try:
+            self.root.protocol("WM_DELETE_WINDOW", self._on_close_apply_update)
+        except Exception:
+            pass
+
+    def _apply_now(self):
+        """즉시 교체 후 재시작. 조회 중이면 결과를 잃지 않도록 '닫을 때 적용'으로 전환."""
+        if self._is_searching():
+            self._arm_apply_on_close()
+            messagebox.showinfo(
+                "업데이트",
+                "조회가 진행 중이라 지금은 재시작하지 않습니다.\n"
+                "프로그램을 닫을 때 새 버전이 자동으로 적용됩니다.",
+            )
+            return
+        try:
+            apply_update(sys.executable, self._upd_path, relaunch=True)
+        except Exception as e:
+            self._arm_apply_on_close()
+            messagebox.showerror(
+                "업데이트 적용 실패",
+                f"새 버전을 적용하지 못했습니다. 현재 버전으로 계속 사용합니다.\n"
+                f"(프로그램을 닫을 때 한 번 더 적용을 시도합니다)\n\n{e}",
+            )
+            return
+        self._upd_on_close = False
+        try:
+            self.root.destroy()
+        except Exception:
+            pass
+
+    def _on_close_apply_update(self):
+        """창 닫기 훅: 예약된 업데이트를 적용(재시작 없이)한 뒤 종료."""
+        try:
+            if (self._upd_on_close and self._upd_path is not None
+                    and Path(self._upd_path).is_file() and self._is_frozen()):
+                apply_update(sys.executable, self._upd_path, relaunch=False)
+        except Exception:
+            pass  # 적용 실패해도 종료는 진행 (다음 시작 시 잔여 파일 정리 후 재확인)
+        try:
+            self.root.destroy()
+        except Exception:
+            pass
 
     def show_help(self):
         win = tk.Toplevel(self.root)
